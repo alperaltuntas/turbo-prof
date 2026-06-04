@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""Generate a Markdown performance report from MOM6 double_gyre scaling runs.
+
+The companion sweep script (run-scaling-sweep.sh cpu|gpu) sweeps a job-size index
+`i` and leaves one `<platform>_<i>.out` log per run in the run directory. Each
+log ends with an FMS mpp_clock table; we read the cross-PE mean ("tavg") of the
+"Main loop" timer as the per-run measurement.
+
+The methodology fixes the number of *dynamic* steps at 150 for every run
+(TIMEUNIT = dt together with DAYMAX = 150), so wall-clock is directly
+comparable across problem sizes. See docs/METHODOLOGY.md for the full rationale.
+
+This is the "scaling" report type. Reusable building blocks (log parsing,
+provenance capture) live in the `turboprof` package so future report types can
+share them; only the scaling-specific plots, tables, and prose live here.
+
+Usage (under an env with matplotlib, e.g. conda `npl`):
+
+    python3 gen_report.py --cpu-dir DIR [--gpu-dir DIR] \
+        [--stack-dir DIR] [--outdir DIR] [--nsteps 150] [--title "..."]
+
+GPU is optional: if --gpu-dir is omitted (or empty), the GPU sections render as
+"pending" and the same command can be re-run later to fill them in.
+"""
+
+import argparse
+import csv
+import datetime
+import json
+import os
+
+from turboprof.parsing import (
+    NK, BLOCK, CPU_PER_NODE, NSTEPS_DEFAULT, collect, add_throughput)
+from turboprof.provenance import gather_provenance, render_provenance
+
+# Reference operating points the team cares about, in gridpoints per GPU.
+REF_POINTS = [
+    (720 * 360 * 75, "720x360x75 = 19.4M (no MARBL)"),
+    (360 * 360 * 75, "360x360x75 = 9.7M (MARBL)"),
+]
+
+
+# --- plots ------------------------------------------------------------------
+
+def plot_cpu_timing(cpu_rows, outpath):
+    """Single panel: main-loop time vs problem size across both CPU regimes.
+
+    The sweep is one continuous problem-size scan: up to the node cap both
+    gridpoints and ranks grow together (weak scaling); beyond it only the
+    problem grows while ranks stay at 128 (saturated node). A vertical divider
+    marks the boundary.
+    """
+    import matplotlib.pyplot as plt
+    if not cpu_rows:
+        return None
+
+    x = [r["gridpoints"] for r in cpu_rows]
+    t = [r["main_loop"] for r in cpu_rows]
+    boundary = BLOCK * BLOCK * NK * CPU_PER_NODE  # gridpoints at i = 128
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(x, t, "o-", color="C0", label="measured")
+    ax.axvline(boundary, ls=":", color="red", alpha=0.7)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    _, hi = ax.get_ylim()
+    ax.text(boundary * 0.85, hi * 0.7, "ranks grow\n(weak scaling)",
+            ha="right", va="top", fontsize=9, color="dimgray")
+    ax.text(boundary * 1.15, hi * 0.7, "128 ranks fixed\n(work/rank grows)",
+            ha="left", va="top", fontsize=9, color="dimgray")
+
+    ax.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
+    ax.set_ylabel("Main loop wall time (s)")
+    ax.set_title("CPU timing vs problem size")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="lower right")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
+def plot_throughput(cpu_rows, gpu_rows, outpath):
+    import matplotlib.pyplot as plt
+    import matplotlib.transforms as mtransforms
+    fig, ax = plt.subplots(figsize=(8, 5))
+
+    if cpu_rows:
+        x = [r["gridpoints"] for r in cpu_rows]
+        y = [r["throughput"] for r in cpu_rows]
+        ax.plot(x, y, "s-", label="CPU node (<=128 ranks)", color="C0")
+    if gpu_rows:
+        x = [r["gridpoints"] for r in gpu_rows]
+        y = [r["throughput"] for r in gpu_rows]
+        ax.plot(x, y, "o-", label="1 GPU (A100)", color="C1")
+
+    # x in data coords, y in axes-fraction so labels sit just above the x-axis
+    trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    for gp, label in REF_POINTS:
+        ax.axvline(gp, ls="--", alpha=0.6, color="gray")
+        ax.text(gp, 0.02, " " + label, rotation=90, transform=trans,
+                va="bottom", ha="right", fontsize=8, color="gray")
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
+    ax.set_ylabel("Throughput (cell-updates / s)")
+    ax.set_title("Throughput vs problem size")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
+# --- report -----------------------------------------------------------------
+
+def fmt_int(n):
+    return f"{n:,}" if n is not None else "-"
+
+
+def cpu_table(rows):
+    head = ("| i | ranks | NI x NJ | gridpoints | gp/rank | dt | main loop (s) "
+            "| s/step | throughput (cell-up/s) |\n"
+            "|---|---|---|---|---|---|---|---|---|\n")
+    body = ""
+    for r in rows:
+        body += (f"| {r['i']} | {r['nranks']} | {r['ni']}x{r['nj']} "
+                 f"| {fmt_int(r['gridpoints'])} | {fmt_int(int(r['gridpoints_per_rank']))} "
+                 f"| {r['dt']} | {r['main_loop']:.3f} | {r['sec_per_step']:.4f} "
+                 f"| {r['throughput']:.3e} |\n")
+    return head + body
+
+
+def gpu_table(rows):
+    head = ("| i | NI x NJ | gridpoints | dt | main loop (s) | s/step "
+            "| throughput (cell-up/s) |\n"
+            "|---|---|---|---|---|---|---|\n")
+    body = ""
+    for r in rows:
+        body += (f"| {r['i']} | {r['ni']}x{r['nj']} | {fmt_int(r['gridpoints'])} "
+                 f"| {r['dt']} | {r['main_loop']:.3f} | {r['sec_per_step']:.4f} "
+                 f"| {r['throughput']:.3e} |\n")
+    return head + body
+
+
+def write_csv(rows, path):
+    if not rows:
+        return
+    cols = ["platform", "i", "ni", "nj", "nk", "nranks", "gridpoints",
+            "gridpoints_per_rank", "dt", "nsteps", "main_loop", "total_runtime",
+            "init", "termination", "sec_per_step", "throughput"]
+    with open(path, "w", newline="") as fh:
+        w = csv.DictWriter(fh, fieldnames=cols, extrasaction="ignore")
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
+
+
+def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None):
+    # per-rank work for the weak-scaling regime: one 32x32 block x NK levels
+    block_str = f"{BLOCK}x{BLOCK}x{NK}"
+    L = []
+    L.append(f"# {title}\n")
+
+    if prov is not None:
+        L.append(render_provenance(prov))
+
+    L.append("## Intent\n")
+    L.append(
+        "Characterize MOM6 throughput on Derecho for the `double_gyre` "
+        "benchmark, comparing a single A100 GPU against a full 128-rank CPU "
+        "node, to locate the problem size at which the GPU port becomes "
+        "competitive and to confirm where production-scale workloads "
+        "(~19.4M gridpoints/GPU without MARBL, ~9.7M with MARBL) land on the "
+        "curve.\n")
+
+    L.append("## Methodology\n")
+    L.append(
+        f"Each run advances exactly **{nsteps} dynamic steps** "
+        "(`TIMEUNIT = dt` with `DAYMAX = 150`), so wall-clock time is directly "
+        "comparable across problem sizes. The job-size index `i` sets a "
+        "near-square layout of `i` 32x32 column blocks at NK=100.\n\n"
+        "- **CPU branch** (`run-scaling-sweep.sh cpu`): weak scaling. Ranks grow "
+        f"with `i` at a constant {block_str} gridpoints/rank up to the 128-rank "
+        "node cap; beyond that, ranks stay at 128 and per-rank work grows.\n"
+        "- **GPU branch** (`run-scaling-sweep.sh gpu`): single-device problem-size scan "
+        "(1 GPU, 1x1 decomposition) that reveals the throughput-saturation "
+        "knee.\n\n"
+        "The per-run measurement is the cross-PE mean of the FMS `Main loop` "
+        "timer. Throughput is reported as cell-updates/s "
+        f"= gridpoints x {nsteps} / main-loop-time.\n")
+
+    if plots.get("cpu_timing"):
+        L.append("## CPU timing\n")
+        L.append(f"![CPU timing]({os.path.basename(plots['cpu_timing'])})\n")
+        L.append(
+            "One continuous problem-size scan. **Left of the divider** "
+            f"(weak scaling): ranks grow with the problem at a fixed {block_str} "
+            "gridpoints/rank, so the rise is halo-exchange plus "
+            "barotropic-solver collective overhead. **Right of the divider** "
+            "(saturated node): ranks stay at the 128-rank cap and per-rank "
+            "work grows, so time rises with the added work. The slope change "
+            "at the divider is the transition between the two regimes.\n")
+
+    if plots.get("throughput"):
+        L.append("## Throughput vs problem size\n")
+        L.append(f"![Throughput]({os.path.basename(plots['throughput'])})\n")
+        L.append(
+            "Dashed verticals mark the production operating points "
+            "(19.4M gridpoints/GPU without MARBL; 9.7M with MARBL).\n")
+
+    L.append("## Results: CPU branch\n")
+    L.append(cpu_table(cpu_rows) if cpu_rows else "_No CPU runs found._\n")
+
+    L.append("\n## Results: GPU branch\n")
+    if gpu_rows:
+        L.append(gpu_table(gpu_rows))
+    else:
+        L.append("_GPU runs pending. Re-run this script with `--gpu-dir` once "
+                 "the queue job completes to fill in this section._\n")
+
+    return "\n".join(L) + "\n"
+
+
+DEFAULT_REPORTS_DIR = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "reports"))
+
+
+def resolve_outdir(args, now):
+    """Pick the report directory.
+
+    With --outdir, honor it verbatim (explicit escape hatch). Otherwise build
+    `<reports-dir>/<YYYY-MM-DD-HHMMSS>-<label>` -- the seconds-resolution stamp
+    keeps multiple reports per day distinct and chronologically sorted. On the
+    rare same-second collision, append -2, -3, ... so we never clobber.
+    """
+    if args.outdir:
+        return args.outdir
+    stamp = now.strftime("%Y-%m-%d-%H%M%S")
+    base = os.path.join(args.reports_dir, f"{stamp}-{args.label}")
+    outdir, n = base, 1
+    while os.path.exists(outdir):
+        n += 1
+        outdir = f"{base}-{n}"
+    return outdir
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--cpu-dir", help="directory with cpu_*.out logs")
+    ap.add_argument("--gpu-dir", help="directory with gpu_*.out logs")
+    ap.add_argument("--reports-dir", default=DEFAULT_REPORTS_DIR,
+                    help="parent directory for timestamped report dirs "
+                    "(default: ../reports)")
+    ap.add_argument("--label", default="double_gyre",
+                    help="trailing label for the report dir name "
+                    "(default: double_gyre); dir is <date-time>-<label>")
+    ap.add_argument("--outdir", help="explicit output directory; overrides the "
+                    "timestamped --reports-dir/--label naming")
+    ap.add_argument("--nsteps", type=int, default=NSTEPS_DEFAULT,
+                    help=f"dynamic steps per run (default {NSTEPS_DEFAULT})")
+    ap.add_argument("--title", default="MOM6 double_gyre GPU vs CPU scaling")
+    ap.add_argument("--stack-dir", help="path to turbo-stack checkout, for "
+                    "recording commit hashes and build flags in the report")
+    ap.add_argument("--note", help="free-form note added to the provenance block")
+    ap.add_argument("--date", help="override the generated timestamp text in "
+                    "the provenance block; defaults to now (YYYY-MM-DD HH:MM:SS)")
+    args = ap.parse_args()
+
+    if not args.cpu_dir and not args.gpu_dir:
+        ap.error("provide at least one of --cpu-dir / --gpu-dir")
+
+    now = datetime.datetime.now()
+    gen_time = args.date or now.isoformat(sep=" ", timespec="seconds")
+
+    cpu_rows = add_throughput(collect(args.cpu_dir, "cpu"), args.nsteps)
+    gpu_rows = add_throughput(collect(args.gpu_dir, "gpu"), args.nsteps)
+    print(f"Parsed {len(cpu_rows)} CPU run(s), {len(gpu_rows)} GPU run(s).")
+
+    prov = gather_provenance(args.stack_dir, args.note, gen_time)
+
+    outdir = resolve_outdir(args, now)
+    os.makedirs(outdir, exist_ok=True)
+    write_csv(cpu_rows + gpu_rows, os.path.join(outdir, "results.csv"))
+    with open(os.path.join(outdir, "provenance.json"), "w") as fh:
+        json.dump(prov, fh, indent=2)
+
+    plots = {}
+    if cpu_rows:
+        plots["cpu_timing"] = plot_cpu_timing(
+            cpu_rows, os.path.join(outdir, "cpu_timing.png"))
+    if cpu_rows or gpu_rows:
+        plots["throughput"] = plot_throughput(
+            cpu_rows, gpu_rows, os.path.join(outdir, "throughput.png"))
+
+    report = build_report(cpu_rows, gpu_rows, plots, args.nsteps, args.title,
+                          prov=prov)
+    report_path = os.path.join(outdir, "report.md")
+    with open(report_path, "w") as fh:
+        fh.write(report)
+    print(f"Wrote report to {outdir}/")
+    print(f"  report.md, results.csv, provenance.json")
+    for p in plots.values():
+        if p:
+            print(f"  {os.path.basename(p)}")
+
+
+if __name__ == "__main__":
+    main()

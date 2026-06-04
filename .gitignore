@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+
+# Profiler artifacts (large, regenerable)
+*.nsys-rep
+*.sqlite
+
+# Raw run outputs (the committed report distills these)
+*_[0-9][0-9][0-9].out
+*_[0-9][0-9][0-9].err
+logfile.*
+*.nc
+RESTART/
+INPUT/
+
+# Scratch report dirs anywhere (committed reports live under reports/, plural)
+report/
+report_*/

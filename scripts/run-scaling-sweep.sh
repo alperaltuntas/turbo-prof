@@ -103,18 +103,23 @@ EOF
     if [ "${PLATFORM}" == "gpu" ]; then
         # set_gpu_rank handles the per-rank CUDA_VISIBLE_DEVICES assignment;
         # CPU placement/affinity stays on the mpirun flags below.
+        # Redirect mpiexec's OWN stderr to .err *before* the pipe; a trailing
+        # `2>` after `| tee` would capture tee's stderr (always empty), losing
+        # the model's CUDA/OOM/abort messages. stdout still tees to .out.
         mpiexec -np ${NGPUS} \
             --ppn ${RANKS_PER_NODE} \
             --cpu-bind=core \
             set_gpu_rank ${MOM6_EXEC} \
-            | tee ${PLATFORM}_${i0}.out 2> ${PLATFORM}_${i0}.err
+            2> ${PLATFORM}_${i0}.err \
+            | tee ${PLATFORM}_${i0}.out
     else
         # For socket-level binding instead of core, use --cpu-bind=socket.
         mpiexec -np ${nranks} \
             --ppn ${nranks} \
             --cpu-bind=core \
             ${MOM6_EXEC} \
-            | tee ${PLATFORM}_${i0}.out 2> ${PLATFORM}_${i0}.err
+            2> ${PLATFORM}_${i0}.err \
+            | tee ${PLATFORM}_${i0}.out
     fi
 
 done

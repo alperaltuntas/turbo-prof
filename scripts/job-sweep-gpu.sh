@@ -2,12 +2,9 @@
 #PBS -A NCGD0067
 #PBS -N mom6_standalone_gpu
 #PBS -q main
-#PBS -l walltime=02:00:00
-# Derecho GPU nodes are single-socket: 64 cores + 4x A100. Request one GPU's
-# quarter-node share (16 cores). The sweep launches 1 rank on 1 GPU, so
-# mpiprocs=1. NOTE: ncpus must be <= 64 here -- 128 (the CPU-node count) is
-# unsatisfiable alongside a GPU and leaves the job queued forever.
+#PBS -l walltime=01:00:00
 #PBS -l select=1:ncpus=16:mpiprocs=1:ngpus=1
+#PBS -l job_priority=premium
 
 # Load modules to match compile-time environment
 module load ncarenv/25.10 cuda/12.9.0 hdf5/1.14.6 nvhpc/25.9 ncarcompilers/1.1.0 netcdf/4.9.3

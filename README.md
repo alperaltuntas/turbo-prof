@@ -56,6 +56,15 @@ Both branches now share one run directory; the `cpu_*.out` and `gpu_*.out`
 logs are namespaced by platform, so pass the same `double_gyre` dir for both
 `--cpu-dir` and `--gpu-dir`.
 
+To get the **"Continuity solver in isolation"** section (the GPU-ported region
+on its own, separated from the whole-model main loop), the runs must expose
+MOM6's `(Ocean continuity equation)` timer. That needs `clock_grain = 'ROUTINE'`
+in the `&fms_nml` block of `input.nml` *at run time* — the FMS default of
+`'NONE'` prints only the four top-level driver clocks. Runs made without it
+still report fine; the continuity section just stays hidden. See
+`docs/METHODOLOGY.md` for the timer caveat (the GPU continuity timer includes
+device⇄host copies, not just the kernel).
+
 The report is written to a timestamped directory
 `reports/<YYYY-MM-DD-HHMMSS>-<label>/`, so multiple reports per day stay
 distinct and sort chronologically. Override the location with `--outdir DIR`

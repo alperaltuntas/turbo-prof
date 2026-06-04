@@ -43,6 +43,13 @@ _TIMER_RE = {
     "total_runtime": re.compile(r"^Total runtime\s+\d+\s+\S+\s+\S+\s+(\S+)"),
     "init":          re.compile(r"^Initialization\s+\d+\s+\S+\s+\S+\s+(\S+)"),
     "termination":   re.compile(r"^Termination\s+\d+\s+\S+\s+\S+\s+(\S+)"),
+    # The GPU port targets the continuity solver; MOM6 wraps it in this
+    # CLOCK_MODULE timer. It only appears when the run sets clock_grain >=
+    # 'MODULE' in input.nml (&fms_nml) -- coarser runs leave it None. CAVEAT:
+    # this is an end-to-end timer. It captures the AMReX call stack PLUS the
+    # device<->host copies around the kernel, not the pure GPU kernel time;
+    # separating those needs Nsight Systems (run-profile.sh).
+    "continuity":    re.compile(r"^\(Ocean continuity equation\)\s+\d+\s+\S+\s+\S+\s+(\S+)"),
 }
 _OVERRIDE_RE = {
     "niglobal": re.compile(r"'NIGLOBAL = (\d+)'"),
@@ -54,7 +61,8 @@ _OVERRIDE_RE = {
 def parse_run(path):
     """Return a dict of timers + parsed overrides, or None if no Main loop timer."""
     out = {"main_loop": None, "total_runtime": None, "init": None,
-           "termination": None, "niglobal": None, "njglobal": None, "dt": None}
+           "termination": None, "continuity": None,
+           "niglobal": None, "njglobal": None, "dt": None}
     with open(path, errors="replace") as fh:
         for line in fh:
             for key, rgx in _TIMER_RE.items():
@@ -126,6 +134,7 @@ def collect(run_dir, platform):
             "total_runtime": parsed["total_runtime"],
             "init": parsed["init"],
             "termination": parsed["termination"],
+            "continuity": parsed["continuity"],
         })
     rows.sort(key=lambda r: r["i"])
     failures.sort(key=lambda r: r["i"])
@@ -138,4 +147,14 @@ def add_throughput(rows, nsteps):
         r["sec_per_step"] = r["main_loop"] / nsteps
         # cell-updates per second across the whole device/node
         r["throughput"] = r["gridpoints"] * nsteps / r["main_loop"]
+        # Continuity-solver-only metrics, when the timer is present (runs with
+        # clock_grain >= 'MODULE'). This isolates the GPU-ported region from
+        # the whole-model main loop -- see the CAVEAT on the continuity timer
+        # above: the GPU figure here is compute + host<->device copies, not the
+        # bare kernel.
+        cont = r.get("continuity")
+        if cont:
+            r["continuity_per_step"] = cont / nsteps
+            r["continuity_throughput"] = r["gridpoints"] * nsteps / cont
+            r["continuity_frac"] = cont / r["main_loop"]
     return rows

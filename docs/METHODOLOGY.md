@@ -88,6 +88,52 @@ The `JOBSIZES` comment variants (`# GPU-like` powers of 2 vs. `# CPU-like` with 
 pick grids that factor cleanly onto the respective node geometry (128 cores → 16×8; the
 96/192 variants suit a 96-core node → 12×8).
 
+## Isolating the ported region (continuity solver)
+
+The whole-model `Main loop` timer answers "what does one GPU buy the *whole*
+`double_gyre` model", but the GPU port currently covers only the **continuity
+solver** — the rest of the main loop (tracers, thermodynamics, the barotropic
+solver, diagnostics, halo updates) still runs on the host. By Amdahl's law the
+whole-model speedup is therefore bounded by how large a slice continuity is, and
+a modest or sub-unity whole-model number says more about the *un-ported* fraction
+than about the port's quality. To judge the port itself, isolate its region.
+
+MOM6 wraps the solver in a `cpu_clock` named **`(Ocean continuity equation)`**
+(`grain = CLOCK_MODULE`). It is *not* printed by default: the FMS `&fms_nml`
+namelist defaults to `clock_grain = 'NONE'`, which emits only the four grain-0
+driver clocks (`Total runtime`, `Initialization`, `Main loop`, `Termination`).
+Set
+
+```
+&fms_nml
+    clock_grain = 'ROUTINE'
+/
+```
+
+in `input.nml` (the level MOM6's own `.testing` suite uses) so the continuity
+timer — and the rest of the routine-level breakdown — appears in the mpp_clock
+table. `gen_report.py` then emits a **"Continuity solver in isolation"** section:
+the solver's share of the main loop (the Amdahl ceiling) and the continuity-only
+GPU-vs-CPU throughput ratio.
+
+### Caveat: what the continuity timer actually measures
+
+The continuity timer is an FMS `mpp_clock` around the solver **call**, so on the
+GPU it captures the **AMReX call stack plus the device⇄host copies**, not the
+bare kernel. Because the rest of the model lives on the host in the current
+architecture, the solver's inputs/outputs are copied across the PCIe bus every
+step, and that transfer cost is folded into the timer. So:
+
+- It **is** the right number for *what the model pays for the ported region
+  end-to-end* (compute + transfers) — an honest integration cost.
+- It **overstates** the GPU kernel and conflates compute with transfer, so it is
+  **not** a measure of kernel speed.
+
+To split kernel time from device⇄host copies and AMReX overhead, profile the
+continuity region with **Nsight Systems** (`run-profile.sh`). The recurring
+copy cost is also the leading suspect for why the *whole-model* speedup is weak,
+so quantifying it is the natural next experiment.
+
 ## Fixed per-run settings
 
 | Parameter         | Value         | Purpose                                              |

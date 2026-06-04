@@ -14,6 +14,10 @@ logfile.*
 RESTART/
 INPUT/
 
+# PBS job spool (stdout/stderr left in the submit dir, e.g. mom6_standalone_gpu.o123456)
+*.o[0-9]*
+*.e[0-9]*
+
 # Scratch report dirs anywhere (committed reports live under reports/, plural)
 report/
 report_*/

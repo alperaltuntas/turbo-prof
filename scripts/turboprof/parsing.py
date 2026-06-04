@@ -73,23 +73,40 @@ def parse_run(path):
 
 
 def collect(run_dir, platform):
-    """Parse all <platform>_<i>.out logs in run_dir into a list of metric dicts."""
+    """Parse all <platform>_<i>.out logs in run_dir. Returns (rows, failures).
+
+    ``rows`` is one metric dict per run that reached the FMS timer table.
+    ``failures`` lists runs whose log had no ``Main loop`` timer (crashed, ran
+    out of memory, or never got that far), with the geometry reconstructed from
+    the job-size index so callers can report what was lost instead of silently
+    dropping it.
+    """
     if not run_dir or not os.path.isdir(run_dir):
-        return []
+        return [], []
     pat = re.compile(rf"^{platform}_(\d+)\.out$")
-    rows = []
+    rows, failures = [], []
     for fname in sorted(os.listdir(run_dir)):
         m = pat.match(fname)
         if not m:
             continue
         i = int(m.group(1))
+        gm, gn = get_layout(i)             # geometry layout (square-ish over i)
         parsed = parse_run(os.path.join(run_dir, fname))
         if parsed is None:
             print(f"  warning: no Main loop timer in {fname} (run failed?)",
                   file=sys.stderr)
+            ni, nj = BLOCK * gm, BLOCK * gn
+            failures.append({
+                "i": i,
+                "platform": platform,
+                "ni": ni,
+                "nj": nj,
+                "nk": NK,
+                "gridpoints": ni * nj * NK,
+                "fname": fname,
+            })
             continue
 
-        gm, gn = get_layout(i)             # geometry layout (square-ish over i)
         ni = parsed["niglobal"] or BLOCK * gm
         nj = parsed["njglobal"] or BLOCK * gn
         nranks = min(i, CPU_PER_NODE) if platform == "cpu" else 1
@@ -111,7 +128,8 @@ def collect(run_dir, platform):
             "termination": parsed["termination"],
         })
     rows.sort(key=lambda r: r["i"])
-    return rows
+    failures.sort(key=lambda r: r["i"])
+    return rows, failures
 
 
 def add_throughput(rows, nsteps):

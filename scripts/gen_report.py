@@ -31,7 +31,7 @@ import os
 
 from turboprof.parsing import (
     NK, BLOCK, CPU_PER_NODE, NSTEPS_DEFAULT, collect, add_throughput)
-from turboprof.provenance import gather_provenance, render_provenance
+from turboprof.provenance import gather_provenance, render_provenance, render_stamp
 
 # Reference operating points the team cares about, in gridpoints per GPU.
 REF_POINTS = [
@@ -115,10 +115,102 @@ def plot_throughput(cpu_rows, gpu_rows, outpath):
     return outpath
 
 
+def plot_speedup(cpu_rows, gpu_rows, outpath):
+    """GPU-to-CPU throughput ratio vs problem size -- the crossover plot.
+
+    Speedup = single-GPU throughput / CPU-node throughput, matched by job-size
+    index `i` (identical problem size). A solid line at 1.0 marks parity; above
+    it the GPU wins, below it the full CPU node wins. The shaded band (problem
+    >= the i=128 node-saturation point) is where the comparison is a clean
+    1-GPU-vs-1-full-node match per METHODOLOGY.md; left of it the CPU branch is
+    still weak-scaling on fewer than 128 ranks, so the ratio mixes regimes.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.transforms as mtransforms
+    if not cpu_rows or not gpu_rows:
+        return None
+
+    cpu_by_i = {r["i"]: r for r in cpu_rows}
+    pts = sorted((g["gridpoints"], g["throughput"] / cpu_by_i[g["i"]]["throughput"])
+                 for g in gpu_rows if g["i"] in cpu_by_i)
+    if not pts:
+        return None
+    x = [p[0] for p in pts]
+    y = [p[1] for p in pts]
+    boundary = BLOCK * BLOCK * NK * CPU_PER_NODE  # gridpoints at i = 128
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(x, y, "o-", color="C2", label="GPU / CPU-node throughput")
+    ax.axhline(1.0, ls="-", color="black", alpha=0.6, lw=1)
+
+    trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+    if max(x) >= boundary:
+        ax.axvspan(boundary, max(x), color="C0", alpha=0.08)
+        ax.text(boundary, 0.97, " 1 node vs 1 GPU\n (clean comparison)",
+                transform=trans, va="top", ha="left", fontsize=8, color="dimgray")
+    for gp, label in REF_POINTS:
+        ax.axvline(gp, ls="--", alpha=0.6, color="gray")
+        ax.text(gp, 0.02, " " + label, rotation=90, transform=trans,
+                va="bottom", ha="right", fontsize=8, color="gray")
+
+    ax.set_xscale("log")
+    ax.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
+    ax.set_ylabel("Speedup (GPU throughput / CPU-node throughput)")
+    ax.set_title("GPU-vs-CPU speedup vs problem size")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
+def plot_init(cpu_rows, gpu_rows, outpath):
+    """Initialization wall time vs problem size, CPU node vs GPU.
+
+    `init` is the FMS "Initialization" timer -- setup before the main loop. On
+    the GPU it grows steeply (device allocation + host->device staging + kernel
+    setup), a fixed per-run cost the main-loop throughput numbers don't capture;
+    on the CPU node it stays modest. Surfacing it explains part of the GPU's
+    disadvantage and its growth toward the memory ceiling at large sizes.
+    """
+    import matplotlib.pyplot as plt
+    series = []
+    if cpu_rows:
+        series.append(("s-", "C0", "CPU node (<=128 ranks)", cpu_rows))
+    if gpu_rows:
+        series.append(("o-", "C1", "1 GPU (A100)", gpu_rows))
+    if not any(any(r.get("init") is not None for r in rs) for *_, rs in series):
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for style, color, label, rows in series:
+        pts = [(r["gridpoints"], r["init"]) for r in rows if r.get("init") is not None]
+        if pts:
+            ax.plot([p[0] for p in pts], [p[1] for p in pts], style,
+                    color=color, label=label)
+
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
+    ax.set_ylabel("Initialization wall time (s)")
+    ax.set_title("Initialization overhead vs problem size")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="upper left")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
 # --- report -----------------------------------------------------------------
 
 def fmt_int(n):
     return f"{n:,}" if n is not None else "-"
+
+
+def fmt_sec(x):
+    return f"{x:.3f}" if x is not None else "-"
 
 
 def cpu_table(rows):
@@ -135,14 +227,51 @@ def cpu_table(rows):
 
 
 def gpu_table(rows):
-    head = ("| i | NI x NJ | gridpoints | dt | main loop (s) | s/step "
+    head = ("| i | NI x NJ | gridpoints | dt | main loop (s) | init (s) | s/step "
             "| throughput (cell-up/s) |\n"
-            "|---|---|---|---|---|---|---|\n")
+            "|---|---|---|---|---|---|---|---|\n")
     body = ""
     for r in rows:
         body += (f"| {r['i']} | {r['ni']}x{r['nj']} | {fmt_int(r['gridpoints'])} "
-                 f"| {r['dt']} | {r['main_loop']:.3f} | {r['sec_per_step']:.4f} "
-                 f"| {r['throughput']:.3e} |\n")
+                 f"| {r['dt']} | {r['main_loop']:.3f} | {fmt_sec(r['init'])} "
+                 f"| {r['sec_per_step']:.4f} | {r['throughput']:.3e} |\n")
+    return head + body
+
+
+def failures_table(failures):
+    """Runs that produced no Main loop timer, so they did not complete."""
+    if not failures:
+        return None
+    head = ("| platform | i | NI x NJ | gridpoints | log |\n"
+            "|---|---|---|---|---|\n")
+    body = ""
+    for f in failures:
+        body += (f"| {f['platform']} | {f['i']} | {f['ni']}x{f['nj']} "
+                 f"| {fmt_int(f['gridpoints'])} | `{f['fname']}` |\n")
+    return head + body
+
+
+def comparison_table(cpu_rows, gpu_rows):
+    """Head-to-head over the job sizes present in BOTH branches.
+
+    One row per shared `i`: the same problem size run on 1 full CPU node vs 1
+    GPU. `GPU/CPU speedup` is GPU throughput / CPU throughput -- > 1 means the
+    GPU wins at that size. Returns None if the branches share no job sizes.
+    """
+    cpu_by_i = {r["i"]: r for r in cpu_rows}
+    shared = [(cpu_by_i[g["i"]], g) for g in gpu_rows if g["i"] in cpu_by_i]
+    if not shared:
+        return None
+    head = ("| i | gridpoints | CPU ranks | CPU loop (s) | GPU loop (s) "
+            "| CPU thrpt (cell-up/s) | GPU thrpt (cell-up/s) | GPU/CPU speedup |\n"
+            "|---|---|---|---|---|---|---|---|\n")
+    body = ""
+    for c, g in shared:
+        speedup = g["throughput"] / c["throughput"]
+        body += (f"| {g['i']} | {fmt_int(g['gridpoints'])} | {c['nranks']} "
+                 f"| {c['main_loop']:.3f} | {g['main_loop']:.3f} "
+                 f"| {c['throughput']:.3e} | {g['throughput']:.3e} "
+                 f"| {speedup:.2f}x |\n")
     return head + body
 
 
@@ -159,14 +288,15 @@ def write_csv(rows, path):
             w.writerow(r)
 
 
-def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None):
+def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
+                 failures=None):
     # per-rank work for the weak-scaling regime: one 32x32 block x NK levels
     block_str = f"{BLOCK}x{BLOCK}x{NK}"
     L = []
     L.append(f"# {title}\n")
 
     if prov is not None:
-        L.append(render_provenance(prov))
+        L.append(render_stamp(prov))
 
     L.append("## Intent\n")
     L.append(
@@ -212,6 +342,52 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None):
             "Dashed verticals mark the production operating points "
             "(19.4M gridpoints/GPU without MARBL; 9.7M with MARBL).\n")
 
+    if plots.get("speedup"):
+        L.append("## GPU vs CPU speedup\n")
+        L.append(f"![Speedup]({os.path.basename(plots['speedup'])})\n")
+        L.append(
+            "Speedup is the single-GPU throughput divided by the CPU-node "
+            "throughput at the same problem size (matched by job-size index "
+            "`i`). The solid line at 1.0 is parity: above it the GPU wins, "
+            "below it a full CPU node wins. The shaded band (problem size at or "
+            "beyond the i=128 node-saturation point) is where the comparison is "
+            "a clean 1-GPU-vs-1-full-node match; left of it the CPU branch is "
+            "still weak-scaling across fewer than 128 ranks, so the ratio there "
+            "mixes scaling regimes and should be read with care. Dashed "
+            "verticals mark the production operating points.\n")
+
+    ct = comparison_table(cpu_rows, gpu_rows)
+    if ct:
+        L.append("## Head-to-head: 1 GPU vs 1 CPU node\n")
+        L.append(
+            "Job sizes present in both branches, putting one full CPU node and "
+            "one A100 on the identical problem. `GPU/CPU speedup` > 1 means the "
+            "GPU wins at that size.\n")
+        L.append(ct)
+
+    if plots.get("init"):
+        L.append("## Initialization overhead\n")
+        L.append(f"![Initialization]({os.path.basename(plots['init'])})\n")
+        L.append(
+            "The FMS `Initialization` timer -- setup, allocation, and (on the "
+            "GPU) host-to-device staging and kernel setup before the main loop. "
+            "This is a fixed per-run cost that the main-loop throughput numbers "
+            "do not capture. The CPU node stays modest while the GPU's init "
+            "cost climbs steeply with problem size, which both drags the GPU at "
+            "small problems and tracks its march toward the single-device "
+            "memory ceiling at large ones.\n")
+
+    ft = failures_table(failures)
+    if ft:
+        L.append("## Failed / missing runs\n")
+        L.append(
+            "These runs produced no FMS `Main loop` timer -- the log never "
+            "reached the timer table, so the run did not complete and is "
+            "excluded from the plots and tables in this report. A failure only "
+            "at the largest GPU size is the expected single-device memory "
+            "ceiling (the GPU ran out of memory); confirm against the run log.\n")
+        L.append(ft)
+
     L.append("## Results: CPU branch\n")
     L.append(cpu_table(cpu_rows) if cpu_rows else "_No CPU runs found._\n")
 
@@ -221,6 +397,9 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None):
     else:
         L.append("_GPU runs pending. Re-run this script with `--gpu-dir` once "
                  "the queue job completes to fill in this section._\n")
+
+    if prov is not None:
+        L.append(render_provenance(prov, include_stamp=False))
 
     return "\n".join(L) + "\n"
 
@@ -277,9 +456,13 @@ def main():
     now = datetime.datetime.now()
     gen_time = args.date or now.isoformat(sep=" ", timespec="seconds")
 
-    cpu_rows = add_throughput(collect(args.cpu_dir, "cpu"), args.nsteps)
-    gpu_rows = add_throughput(collect(args.gpu_dir, "gpu"), args.nsteps)
-    print(f"Parsed {len(cpu_rows)} CPU run(s), {len(gpu_rows)} GPU run(s).")
+    cpu_rows, cpu_fail = collect(args.cpu_dir, "cpu")
+    gpu_rows, gpu_fail = collect(args.gpu_dir, "gpu")
+    add_throughput(cpu_rows, args.nsteps)
+    add_throughput(gpu_rows, args.nsteps)
+    failures = cpu_fail + gpu_fail
+    print(f"Parsed {len(cpu_rows)} CPU run(s), {len(gpu_rows)} GPU run(s); "
+          f"{len(failures)} failed/incomplete.")
 
     prov = gather_provenance(args.stack_dir, args.note, gen_time)
 
@@ -296,9 +479,15 @@ def main():
     if cpu_rows or gpu_rows:
         plots["throughput"] = plot_throughput(
             cpu_rows, gpu_rows, os.path.join(outdir, "throughput.png"))
+    if cpu_rows and gpu_rows:
+        plots["speedup"] = plot_speedup(
+            cpu_rows, gpu_rows, os.path.join(outdir, "speedup.png"))
+    if cpu_rows or gpu_rows:
+        plots["init"] = plot_init(
+            cpu_rows, gpu_rows, os.path.join(outdir, "init.png"))
 
     report = build_report(cpu_rows, gpu_rows, plots, args.nsteps, args.title,
-                          prov=prov)
+                          prov=prov, failures=failures)
     report_path = os.path.join(outdir, "report.md")
     with open(report_path, "w") as fh:
         fh.write(report)

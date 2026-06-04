@@ -69,10 +69,25 @@ def gather_provenance(stack_dir, note, date):
     return prov
 
 
-def render_provenance(prov):
-    """Markdown 'Provenance' section from a gather_provenance() dict."""
+def render_stamp(prov):
+    """One-line 'generated on' stamp for the top of a report.
+
+    The full Provenance section (commits, build flags, submodule snapshot) is
+    reproducibility detail that belongs at the end; only this lightweight stamp
+    leads the report.
+    """
+    return f"**Generated:** {prov['date_generated']} on `{prov['host']}`\n"
+
+
+def render_provenance(prov, include_stamp=True):
+    """Markdown 'Provenance' section from a gather_provenance() dict.
+
+    With ``include_stamp=False`` the leading generated-on line is omitted (the
+    caller is rendering it separately at the top via ``render_stamp``).
+    """
     L = ["## Provenance\n"]
-    L.append(f"- **Generated:** {prov['date_generated']} on `{prov['host']}`")
+    if include_stamp:
+        L.append(f"- **Generated:** {prov['date_generated']} on `{prov['host']}`")
     if prov.get("note"):
         L.append(f"- **Note:** {prov['note']}")
     if prov.get("stack_dir"):

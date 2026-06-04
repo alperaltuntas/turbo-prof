@@ -21,3 +21,6 @@ INPUT/
 # Scratch report dirs anywhere (committed reports live under reports/, plural)
 report/
 report_*/
+
+# Personal Claude Code settings (the report-commentary skill IS tracked)
+.claude/settings.local.json

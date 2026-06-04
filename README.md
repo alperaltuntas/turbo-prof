@@ -14,9 +14,11 @@ scripts/
   run-profile.sh         one-off Nsight Systems profiling run
   job-sweep-gpu.sh       PBS wrapper: submit the gpu sweep (1 GPU, ncpus=16)
   job-sweep-cpu.sh       PBS wrapper: submit the cpu sweep (1 node, ncpus=128)
-  gen_report.py          parse run logs -> CSV + plots + Markdown report
+  gen_report.py          parse run logs -> CSV + plots + facts-only Markdown report
+  strip_commentary.py    recover the facts-only report from an annotated one
 docs/
   METHODOLOGY.md         scaling methodology (weak/strong, fixed-step trick)
+  REPORTING.md           the facts-vs-commentary two-layer report design
 reports/
   <date-time>-<label>/   one committed report per run
 ```
@@ -79,6 +81,23 @@ optional — omit `--gpu-dir` for a CPU-only interim report and re-run later.
 Each report directory contains `report.md`, `results.csv`, `provenance.json`,
 and the plot PNGs. Raw per-run logs (`*_NNN.out`, `*.nsys-rep`, NetCDF) are not
 committed; the CSV is the durable distillate.
+
+## Adding commentary
+
+`gen_report.py` emits a **facts-only** `report.md` — run parameters, plots, and
+data tables, with no conclusions — that is reproducible from the logs. The
+interpretation (bottleneck calls, what-it-means, what-to-profile-next) is a
+separate layer added on top by the `report-commentary` Claude Code skill, which
+fills the `<!-- commentary: NAME -->` anchors the script leaves behind, grounded
+strictly in the report's own numbers. In Claude Code:
+
+```
+/report-commentary reports/<the-report-dir>
+```
+
+`strip_commentary.py` recovers the facts-only text from an annotated report, so
+the two layers stay mechanically separable. See `docs/REPORTING.md` for the
+design and `.claude/skills/report-commentary/` for the skill's grounding rules.
 
 ## Relationship to turbo-stack
 

@@ -88,21 +88,21 @@ The `JOBSIZES` comment variants (`# GPU-like` powers of 2 vs. `# CPU-like` with 
 pick grids that factor cleanly onto the respective node geometry (128 cores → 16×8; the
 96/192 variants suit a 96-core node → 12×8).
 
-## Isolating the ported region (continuity solver)
+## Routine-level breakdown (which offloaded routines are GPU-efficient)
 
-The whole-model `Main loop` timer answers "what does one GPU buy the *whole*
-`double_gyre` model", but the GPU port currently covers only the **continuity
-solver** — the rest of the main loop (tracers, thermodynamics, the barotropic
-solver, diagnostics, halo updates) still runs on the host. By Amdahl's law the
-whole-model speedup is therefore bounded by how large a slice continuity is, and
-a modest or sub-unity whole-model number says more about the *un-ported* fraction
-than about the port's quality. To judge the port itself, isolate its region.
+The GPU build does **not** offload a single module — it GPU-ifies the model
+*whole* via **OpenMP target directives** (`-mp=gpu`). The dynamical core,
+tracers, and parameterizations are annotated with `!$omp target teams loop`
+compute regions and explicit `map()` host⇄device data movement across ~28 source
+files (`MOM_hor_visc`, `MOM_barotropic`, `MOM_CoriolisAdv`, `MOM_continuity_PPM`,
+`MOM_vert_friction`, the pressure-force and tracer modules, …). So the
+whole-model `Main loop` timer is *not* an Amdahl story about an un-ported
+remainder; every routine runs on the GPU. The real question is **which offloaded
+routines map efficiently to one GPU**, which needs the per-routine timers.
 
-MOM6 wraps the solver in a `cpu_clock` named **`(Ocean continuity equation)`**
-(`grain = CLOCK_MODULE`). It is *not* printed by default: the FMS `&fms_nml`
-namelist defaults to `clock_grain = 'NONE'`, which emits only the four grain-0
-driver clocks (`Total runtime`, `Initialization`, `Main loop`, `Termination`).
-Set
+Those timers are *not* printed by default: the FMS `&fms_nml` namelist defaults
+to `clock_grain = 'NONE'`, which emits only the four grain-0 driver clocks
+(`Total runtime`, `Initialization`, `Main loop`, `Termination`). Set
 
 ```
 &fms_nml
@@ -110,29 +110,33 @@ Set
 /
 ```
 
-in `input.nml` (the level MOM6's own `.testing` suite uses) so the continuity
-timer — and the rest of the routine-level breakdown — appears in the mpp_clock
-table. `gen_report.py` then emits a **"Continuity solver in isolation"** section:
-the solver's share of the main loop (the Amdahl ceiling) and the continuity-only
-GPU-vs-CPU throughput ratio.
+in `input.nml` (the level MOM6's own `.testing` suite uses) so the full
+routine-level table appears. `gen_report.py` then emits two sections:
 
-### Caveat: what the continuity timer actually measures
+- **"Where the main-loop time goes"** — a per-routine bar chart and table (the
+  grain-31 timers) at one shared problem size, 1 CPU node vs 1 GPU. This is the
+  crux view: continuity offloads well (faster on the GPU), while the barotropic
+  solver and viscosity offload poorly (slower) and dominate the loop.
+- **"Continuity solver in isolation"** — the continuity solver (the reviewer's
+  focus and the largest single CPU routine) as a share of the main loop and its
+  GPU-vs-CPU throughput ratio across problem sizes.
 
-The continuity timer is an FMS `mpp_clock` around the solver **call**, so on the
-GPU it captures the **AMReX call stack plus the device⇄host copies**, not the
-bare kernel. Because the rest of the model lives on the host in the current
-architecture, the solver's inputs/outputs are copied across the PCIe bus every
-step, and that transfer cost is folded into the timer. So:
+### Caveat: what a routine timer actually measures on the GPU
 
-- It **is** the right number for *what the model pays for the ported region
+Each routine timer is an FMS `mpp_clock` around the routine **call**, so on the
+GPU it folds in the OpenMP **`target ... map()` host⇄device transfers** and
+runtime overhead around the offloaded loops, not just the kernel. So:
+
+- It **is** the right number for *what the model pays for that routine
   end-to-end* (compute + transfers) — an honest integration cost.
 - It **overstates** the GPU kernel and conflates compute with transfer, so it is
   **not** a measure of kernel speed.
 
-To split kernel time from device⇄host copies and AMReX overhead, profile the
-continuity region with **Nsight Systems** (`run-profile.sh`). The recurring
-copy cost is also the leading suspect for why the *whole-model* speedup is weak,
-so quantifying it is the natural next experiment.
+To split kernel time from the host⇄device transfers, profile the region with
+**Nsight Systems** (`run-profile.sh`). The barotropic solver — an iterative
+sub-cycle with many small `target` regions, `map()` transfers, and halo updates
+per step — is the leading suspect for the weak whole-model GPU number and the
+natural next thing to profile.
 
 ## Fixed per-run settings
 

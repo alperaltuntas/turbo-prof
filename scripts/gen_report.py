@@ -39,6 +39,19 @@ REF_POINTS = [
     (360 * 360 * 75, "360x360x75 = 9.7M (MARBL)"),
 ]
 
+# The continuity solver's mpp_clock name (see parsing.py).
+CONTINUITY_TIMER = "(Ocean continuity equation)"
+
+# The barotropic solver's top-level mpp_clock; its sub-steps share the
+# "(Ocean BT " name prefix (pre-calcs, halo updates, stepping, post-calcs).
+BAROTROPIC_TIMER = "(Ocean barotropic mode stepping)"
+BAROTROPIC_PREFIX = "(Ocean BT "
+
+# Job-size index used for the per-routine breakdown: i=128 is the first clean
+# 1-CPU-node-vs-1-GPU point (13.1M gridpoints, nearest to the 19.4M production
+# size). Overridable with --breakdown-i.
+BREAKDOWN_I_DEFAULT = 128
+
 
 # --- plots ------------------------------------------------------------------
 
@@ -203,63 +216,62 @@ def plot_init(cpu_rows, gpu_rows, outpath):
     return outpath
 
 
-def plot_continuity(cpu_rows, gpu_rows, outpath):
-    """Continuity-solver-only view: the GPU-ported region, not the whole model.
+def _routine_tavg(row, timer):
+    """tavg (s) of one mpp_clock timer on a row, or None if absent / never hit."""
+    t = (row.get("timers") or {}).get(timer)
+    return t["tavg"] if (t and t.get("hits", 0) > 0 and t["tavg"] > 0) else None
 
-    Two panels share the problem-size x-axis:
 
-    * **Left** -- continuity time as a fraction of the main loop, for each
-      platform. This is the Amdahl ceiling: only this slice of the model is
-      GPU-ported, so the whole-model speedup can never exceed what this slice
-      allows. It also shows the port shifting the balance between the branches.
-    * **Right** -- continuity-only speedup (GPU continuity throughput / CPU
-      continuity throughput), matched by job-size index. A solid line at 1.0 is
-      parity. This isolates the port's own performance from the un-ported model.
+def plot_routine_isolation(cpu_rows, gpu_rows, timer, outpath, name):
+    """Isolate one OpenMP-offloaded routine across problem sizes (two panels).
 
-    CAVEAT (stated on the figure): the GPU continuity timer is an FMS clock
-    around the call -- it captures the AMReX call stack plus device<->host
-    copies, not the bare kernel. It is the right number for "what the model
-    pays for the ported region", but it overstates the kernel; an Nsight
-    Systems run is needed to split compute from transfers.
+    * **Left** -- the routine's time as a fraction of the main loop, per
+      platform.
+    * **Right** -- its CPU-node/GPU speedup (time ratio; > 1.0 = GPU faster),
+      matched by job-size index, with the clean 1-node-vs-1-GPU band shaded.
 
-    Returns None unless at least one branch carries continuity timings.
+    CAVEAT (on the figure): a GPU routine timer folds in the OpenMP
+    `target ... map()` host<->device transfers and runtime overhead, not just
+    the kernel; an Nsight Systems run is needed to split compute from transfers.
+
+    Returns None unless at least one branch carries the timer.
     """
     import matplotlib.pyplot as plt
     import matplotlib.transforms as mtransforms
 
-    cpu_c = [r for r in cpu_rows if r.get("continuity")]
-    gpu_c = [r for r in gpu_rows if r.get("continuity")]
+    def series(rows):
+        return [(r["gridpoints"], _routine_tavg(r, timer) / r["main_loop"],
+                 _routine_tavg(r, timer), r["i"])
+                for r in rows if _routine_tavg(r, timer)]
+
+    cpu_c, gpu_c = series(cpu_rows), series(gpu_rows)
     if not cpu_c and not gpu_c:
         return None
 
     boundary = BLOCK * BLOCK * NK * CPU_PER_NODE  # gridpoints at i = 128
     fig, (axf, axs) = plt.subplots(1, 2, figsize=(13, 5))
 
-    # Left: continuity as a fraction of the main loop.
+    # Left: routine as a fraction of the main loop.
     if cpu_c:
-        axf.plot([r["gridpoints"] for r in cpu_c],
-                 [100 * r["continuity_frac"] for r in cpu_c],
+        axf.plot([p[0] for p in cpu_c], [100 * p[1] for p in cpu_c],
                  "s-", color="C0", label="CPU node (<=128 ranks)")
     if gpu_c:
-        axf.plot([r["gridpoints"] for r in gpu_c],
-                 [100 * r["continuity_frac"] for r in gpu_c],
+        axf.plot([p[0] for p in gpu_c], [100 * p[1] for p in gpu_c],
                  "o-", color="C1", label="1 GPU (A100)")
     axf.set_xscale("log")
     axf.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
-    axf.set_ylabel("Continuity time / main loop (%)")
-    axf.set_title("Ported share of the main loop (Amdahl ceiling)")
+    axf.set_ylabel(f"{name} time / main loop (%)")
+    axf.set_title(f"{name} share of the main loop")
     axf.grid(True, which="both", alpha=0.3)
     axf.legend(loc="best")
 
-    # Right: continuity-only GPU/CPU speedup, matched by job-size index.
-    cpu_by_i = {r["i"]: r for r in cpu_c}
-    pts = sorted((g["gridpoints"],
-                  g["continuity_throughput"] / cpu_by_i[g["i"]]["continuity_throughput"])
-                 for g in gpu_c if g["i"] in cpu_by_i)
+    # Right: CPU/GPU speedup (time ratio), matched by job-size index.
+    cpu_by_i = {p[3]: p[2] for p in cpu_c}
+    pts = sorted((g[0], cpu_by_i[g[3]] / g[2]) for g in gpu_c if g[3] in cpu_by_i)
     if pts:
         x = [p[0] for p in pts]
         y = [p[1] for p in pts]
-        axs.plot(x, y, "o-", color="C2", label="GPU / CPU continuity throughput")
+        axs.plot(x, y, "o-", color="C2", label=f"{name} CPU/GPU time ratio")
         axs.axhline(1.0, ls="-", color="black", alpha=0.6, lw=1)
         trans = mtransforms.blended_transform_factory(axs.transData, axs.transAxes)
         if max(x) >= boundary:
@@ -271,21 +283,117 @@ def plot_continuity(cpu_rows, gpu_rows, outpath):
             axs.axvline(gp, ls="--", alpha=0.6, color="gray")
             axs.text(gp, 0.02, " " + label, rotation=90, transform=trans,
                      va="bottom", ha="right", fontsize=8, color="gray")
-        axs.legend(loc="upper left")
+        axs.legend(loc="best")
     else:
-        axs.text(0.5, 0.5, "no shared sizes with\ncontinuity timings",
+        axs.text(0.5, 0.5, "no shared sizes with\nthis timer",
                  transform=axs.transAxes, ha="center", va="center",
                  color="dimgray")
     axs.set_xscale("log")
     axs.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
-    axs.set_ylabel("Continuity-only speedup (GPU / CPU node)")
-    axs.set_title("Continuity-solver speedup (port's own region)")
+    axs.set_ylabel(f"{name} speedup (CPU node / GPU, >1 = GPU faster)")
+    axs.set_title(f"{name} speedup on the GPU")
     axs.grid(True, which="both", alpha=0.3)
 
-    fig.suptitle("GPU continuity timer = AMReX call stack + device<->host "
-                 "copies (not bare kernel); use Nsight Systems to separate.",
+    fig.suptitle(f"GPU {name.lower()} timer folds in OpenMP target map() "
+                 "host<->device transfers (not bare kernel); "
+                 "use Nsight Systems to separate.",
                  fontsize=9, color="dimgray", y=0.02)
     fig.tight_layout(rect=(0, 0.04, 1, 1))
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
+def clean_name(name):
+    """Trim an mpp_clock name to a compact label: '(Ocean foo bar)' -> 'foo bar'.
+
+    Handles names FMS truncated to the column width (no closing paren).
+    """
+    n = name.strip().strip(" *")
+    if n.startswith("("):
+        n = n[1:]
+    if n.endswith(")"):
+        n = n[:-1]
+    if n.startswith("Ocean "):
+        n = n[len("Ocean "):]
+    return n.strip()
+
+
+# Below this wall-time (s) a routine is at the noise floor; a CPU/GPU ratio
+# across it is meaningless (e.g. inter-rank message passing is ~0 on 1 GPU rank).
+RATIO_FLOOR_S = 0.05
+
+
+def _speedup(c, g):
+    """CPU/GPU speedup string, or None if either side is below the noise floor."""
+    if c is None or g is None or c < RATIO_FLOOR_S or g < RATIO_FLOOR_S:
+        return None
+    return c / g
+
+
+def select_components(cpu_row, gpu_row, top_n=12):
+    """Top routine-level timers (grain 31) by wall time, CPU and GPU aligned.
+
+    Grain-31 clocks are the main-loop routines (continuity, barotropic stepping,
+    viscosity, pressure force, ...). In this configuration they do not nest one
+    another -- they sum to `Ocean dynamics` -- so they form a clean per-routine
+    breakdown. Returns [(name, cpu_tavg, gpu_tavg), ...] sorted by the larger of
+    the two, longest first.
+    """
+    ct = cpu_row.get("timers", {}) if cpu_row else {}
+    gt = gpu_row.get("timers", {}) if gpu_row else {}
+    names = set()
+    for table in (ct, gt):
+        for name, rec in table.items():
+            if rec["grain"] == 31 and rec["hits"] > 0 and rec["tavg"] > 0:
+                names.add(name)
+    comps = [(name, ct.get(name, {}).get("tavg", 0.0),
+              gt.get(name, {}).get("tavg", 0.0)) for name in names]
+    comps.sort(key=lambda c: max(c[1], c[2]), reverse=True)
+    return comps[:top_n]
+
+
+def plot_breakdown(cpu_row, gpu_row, outpath, top_n=12):
+    """Per-routine main-loop time, 1 CPU node vs 1 GPU, at one problem size.
+
+    Paired horizontal bars per routine (longest at top), annotated with the
+    CPU/GPU speedup (>1, green = the GPU is faster on that routine; <1, red =
+    slower). The whole model is OpenMP-GPU-offloaded, so this is the crux view:
+    which offloaded routines map efficiently to one GPU. Continuity does; the
+    barotropic solver and viscosity do not, and they dominate -- which is why
+    the whole-model main loop regresses.
+    """
+    import matplotlib.pyplot as plt
+    comps = select_components(cpu_row, gpu_row, top_n)
+    if not comps:
+        return None
+
+    labels = [clean_name(name) for name, _, _ in comps]
+    cpu = [c for _, c, _ in comps]
+    gpu = [g for _, _, g in comps]
+    y = list(range(len(comps)))
+    h = 0.38
+    xmax = max(max(cpu), max(gpu))
+
+    fig, ax = plt.subplots(figsize=(9, 0.52 * len(comps) + 1.8))
+    ax.barh([yi + h / 2 for yi in y], cpu, height=h, color="C0",
+            label="CPU node (128 ranks)")
+    ax.barh([yi - h / 2 for yi in y], gpu, height=h, color="C1",
+            label="1 GPU (A100)")
+    for yi, (_, c, g) in zip(y, comps):
+        sp = _speedup(c, g)
+        if sp is not None:
+            ax.text(max(c, g) + xmax * 0.012, yi, f"{sp:.2f}x", va="center",
+                    fontsize=8, color=("C2" if sp >= 1 else "C3"))
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_xlim(0, xmax * 1.15)
+    ax.set_xlabel("Main-loop time (s)  --  label = CPU/GPU speedup (>1 GPU faster)")
+    ax.set_title("Where the main-loop time goes, by routine")
+    ax.grid(True, axis="x", alpha=0.3)
+    ax.legend(loc="lower right")
+    fig.tight_layout()
     fig.savefig(outpath, dpi=120)
     plt.close(fig)
     return outpath
@@ -330,12 +438,57 @@ def failures_table(failures):
     """Runs that produced no Main loop timer, so they did not complete."""
     if not failures:
         return None
-    head = ("| platform | i | NI x NJ | gridpoints | log |\n"
-            "|---|---|---|---|---|\n")
+    head = ("| platform | i | NI x NJ | gridpoints | log | cause (from stderr) |\n"
+            "|---|---|---|---|---|---|\n")
     body = ""
     for f in failures:
+        reason = f.get("reason") or "_(no stderr captured)_"
         body += (f"| {f['platform']} | {f['i']} | {f['ni']}x{f['nj']} "
-                 f"| {fmt_int(f['gridpoints'])} | `{f['fname']}` |\n")
+                 f"| {fmt_int(f['gridpoints'])} | `{f['fname']}` | {reason} |\n")
+    return head + body
+
+
+def breakdown_table(cpu_row, gpu_row, top_n=12):
+    """Per-routine CPU-node vs GPU times at one problem size, longest first."""
+    comps = select_components(cpu_row, gpu_row, top_n)
+    if not comps:
+        return None
+    head = ("| routine | CPU node (s) | 1 A100 (s) | speedup (CPU/GPU) |\n"
+            "|---|---|---|---|\n")
+    body = ""
+    for name, c, g in comps:
+        sp = _speedup(c, g)
+        sp_str = f"{sp:.2f}x" if sp is not None else "n/a"
+        body += (f"| {clean_name(name)} | {c:.3f} | {g:.3f} | {sp_str} |\n")
+    return head + body
+
+
+def prefix_table(cpu_row, gpu_row, prefix, top_n=8):
+    """Per-sub-timer CPU-node vs GPU table for all timers sharing a name prefix.
+
+    Used to open up the barotropic solver into its sub-steps (BT pre-calcs, halo
+    updates, ...) so the bottleneck is visible. Longest (by max side) first.
+    """
+    ct = (cpu_row.get("timers") or {})
+    gt = (gpu_row.get("timers") or {})
+    names = {n for n in set(ct) | set(gt) if n.startswith(prefix)}
+    rows = []
+    for n in names:
+        c = ct.get(n, {}).get("tavg", 0.0)
+        g = gt.get(n, {}).get("tavg", 0.0)
+        if (ct.get(n, {}).get("hits", 0) or gt.get(n, {}).get("hits", 0)):
+            rows.append((n, c, g))
+    rows.sort(key=lambda r: max(r[1], r[2]), reverse=True)
+    rows = rows[:top_n]
+    if not rows:
+        return None
+    head = ("| sub-step | CPU node (s) | 1 A100 (s) | speedup (CPU/GPU) |\n"
+            "|---|---|---|---|\n")
+    body = ""
+    for n, c, g in rows:
+        sp = _speedup(c, g)
+        sp_str = f"{sp:.2f}x" if sp is not None else "n/a"
+        body += f"| {clean_name(n)} | {c:.3f} | {g:.3f} | {sp_str} |\n"
     return head + body
 
 
@@ -364,11 +517,11 @@ def comparison_table(cpu_rows, gpu_rows):
 
 
 def continuity_table(cpu_rows, gpu_rows):
-    """Head-to-head on the GPU-ported continuity solver alone.
+    """Head-to-head on the continuity solver alone.
 
     One row per job size carrying a continuity timer on both branches. The
-    `%loop` columns show how much of each branch's main loop the solver is
-    (the Amdahl ceiling); `GPU/CPU` is the continuity-only throughput ratio.
+    `%loop` columns show how much of each branch's main loop the solver is;
+    `GPU/CPU` is the continuity-only throughput ratio.
     Returns None if no shared size has continuity timings on both branches.
     """
     cpu_by_i = {r["i"]: r for r in cpu_rows if r.get("continuity")}
@@ -406,7 +559,7 @@ def write_csv(rows, path):
 
 
 def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
-                 failures=None):
+                 failures=None, breakdown=None):
     # per-rank work for the weak-scaling regime: one 32x32 block x NK levels
     block_str = f"{BLOCK}x{BLOCK}x{NK}"
     L = []
@@ -419,10 +572,32 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
     L.append(
         "Characterize MOM6 throughput on Derecho for the `double_gyre` "
         "benchmark, comparing a single A100 GPU against a full 128-rank CPU "
-        "node, to locate the problem size at which the GPU port becomes "
-        "competitive and to confirm where production-scale workloads "
-        "(~19.4M gridpoints/GPU without MARBL, ~9.7M with MARBL) land on the "
-        "curve.\n")
+        "node. The GPU build offloads the model **whole** via OpenMP "
+        "target directives (`-mp=gpu`): the dynamical core, tracers, and "
+        "parameterizations are annotated with `!$omp target teams loop` regions "
+        "and explicit `map()` host<->device data movement (~28 source files).")
+
+    # Headline reads straight off the per-routine breakdown, when we have it.
+    if breakdown:
+        bi, bc, bg = breakdown
+        cont_c = bc.get("timers", {}).get(CONTINUITY_TIMER, {}).get("tavg")
+        cont_g = bg.get("timers", {}).get(CONTINUITY_TIMER, {}).get("tavg")
+        if cont_c and cont_g:
+            L.append("## Key finding\n")
+            L.append(
+                f"At the clean 1-node-vs-1-GPU comparison (i={bi}, "
+                f"{fmt_int(bc['gridpoints'])} gridpoints): the continuity solver "
+                f"is **{cont_c / cont_g:.2f}x faster** on one A100 than on a full "
+                f"CPU node ({cont_c:.1f}s -> {cont_g:.1f}s, transfers included), "
+                f"yet the **whole-model main loop is "
+                f"{bg['main_loop'] / bc['main_loop']:.2f}x slower** "
+                f"({bc['main_loop']:.1f}s -> {bg['main_loop']:.1f}s). The whole "
+                "model is OpenMP-offloaded, so this is not an Amdahl/un-ported "
+                "story: some offloaded routines map well to the GPU (continuity, "
+                "pressure force, momentum increments), but others -- the "
+                "**barotropic solver above all**, plus viscosity -- are much "
+                "slower on the GPU and dominate the loop. See the breakdown "
+                "below.\n")
 
     L.append("## Methodology\n")
     L.append(
@@ -438,7 +613,9 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
         "knee.\n\n"
         "The per-run measurement is the cross-PE mean of the FMS `Main loop` "
         "timer. Throughput is reported as cell-updates/s "
-        f"= gridpoints x {nsteps} / main-loop-time.\n")
+        f"= gridpoints x {nsteps} / main-loop-time. With `clock_grain = 'ROUTINE'` "
+        "in `input.nml` the runs also emit per-routine timers, which drive the "
+        "continuity-isolation and where-the-time-goes sections below.\n")
 
     if plots.get("cpu_timing"):
         L.append("## CPU timing\n")
@@ -482,34 +659,96 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
             "GPU wins at that size.\n")
         L.append(ct)
 
+    if breakdown and (plots.get("breakdown") or breakdown_table(*breakdown[1:])):
+        bi, bc, bg = breakdown
+        L.append("## Where the main-loop time goes (by routine)\n")
+        L.append(
+            f"Per-routine FMS timers (grain 31) at the clean comparison point "
+            f"i={bi} ({fmt_int(bc['gridpoints'])} gridpoints, "
+            f"{bc['ni']}x{bc['nj']}), 1 full CPU node vs 1 A100. `speedup` is "
+            "CPU/GPU time, so > 1 means the GPU is faster on that routine.\n")
+        if plots.get("breakdown"):
+            L.append(f"![Breakdown]({os.path.basename(plots['breakdown'])})\n")
+        bt = breakdown_table(bc, bg)
+        if bt:
+            L.append(bt)
+        L.append(
+            "\nEvery routine here is OpenMP-GPU-offloaded; the spread is in how "
+            "well each maps to one GPU. **Continuity is the clearest win** (and on "
+            "the CPU it is the single largest cost). The whole-model regression is "
+            "driven by routines that offload *poorly* -- the **barotropic solver "
+            "most of all** (slowest on the GPU despite having the most `target` "
+            "regions in the source), plus horizontal viscosity and Coriolis. The "
+            "barotropic mode is an iterative sub-cycle fired many times per "
+            "baroclinic step, so it is launch/overhead-bound on the GPU (see the "
+            "barotropic section below for which sub-step is responsible). Note "
+            "also the diagnostics/`Ocean Other` block (not a grain-31 routine) "
+            "balloons on the GPU. `message passing` is inter-rank halo exchange -- "
+            "the lone GPU rank has none, so its near-zero time is structural "
+            "(ratio `n/a`), not a GPU win. Every GPU routine time still includes "
+            "its `target map()` host<->device transfers (see the caveat below).\n")
+
+    bt_sub = prefix_table(breakdown[1], breakdown[2], BAROTROPIC_PREFIX) if breakdown else None
+    if plots.get("barotropic") or bt_sub:
+        L.append("## Barotropic solver -- the main GPU bottleneck\n")
+        L.append(
+            "The barotropic solver is the largest single cost on the GPU and the "
+            "biggest drag on the whole-model number, so it is the prime "
+            "optimization target. It is an explicit free-surface sub-cycle: many "
+            "short barotropic steps per baroclinic step, each an offloaded "
+            "`!$omp target` region. That structure -- a long sequence of small "
+            "kernels -- is what maps poorly to the GPU.\n")
+        if plots.get("barotropic"):
+            L.append(f"![Barotropic]({os.path.basename(plots['barotropic'])})\n")
+        if bt_sub:
+            bi = breakdown[0]
+            L.append(
+                f"Sub-steps at i={bi} ({fmt_int(breakdown[1]['gridpoints'])} "
+                "gridpoints), 1 CPU node vs 1 A100:\n")
+            L.append(bt_sub)
+            L.append(
+                "\nThe cost is concentrated in **`BT pre-calcs`** (the per-substep "
+                "barotropic calculation), which is several times slower on the "
+                "GPU. Crucially, the **halo updates are ~0 s on the GPU** (one "
+                "rank, no inter-rank exchange), so the bottleneck is **not** "
+                "communication -- it is the per-substep compute kernels firing "
+                "with too little work each (launch/overhead-bound). The deficit "
+                "eases at larger problem sizes (more work per kernel), pointing to "
+                "kernel-fusion / fewer-larger-launches across the sub-cycle as the "
+                "optimization, and Nsight Systems on the barotropic region as the "
+                "next measurement.\n")
+
     cont_t = continuity_table(cpu_rows, gpu_rows)
     if plots.get("continuity") or cont_t:
-        L.append("## Continuity solver in isolation (the ported region)\n")
+        L.append("## Continuity solver in isolation\n")
         L.append(
-            "The whole-model numbers above are governed by Amdahl's law: only "
-            "the **continuity solver** is GPU-ported, so most of the main loop "
-            "(tracers, thermodynamics, the barotropic solver, diagnostics, halo "
-            "updates) still runs on the host. This section isolates the ported "
-            "region using MOM6's `(Ocean continuity equation)` timer, exposed by "
-            "setting `clock_grain = 'ROUTINE'` in `input.nml`.\n\n"
+            "The continuity solver is the reviewer's focus, the single largest "
+            "routine in the CPU main loop (~35-50%), and -- per the breakdown "
+            "above -- one of the routines that offloads *well*. This section "
+            "isolates it across problem sizes using MOM6's "
+            "`(Ocean continuity equation)` timer, exposed by setting "
+            "`clock_grain = 'ROUTINE'` in `input.nml`.\n\n"
             "> **Caveat -- what this timer measures.** The continuity timer is an "
-            "FMS `mpp_clock` around the solver *call*. On the GPU it captures the "
-            "**AMReX call stack plus the device<->host copies**, not the bare "
-            "kernel. In the current architecture the rest of the model is on the "
-            "host, so data ping-pongs across the PCIe bus every step and that "
-            "transfer cost is folded into this number. It is therefore the right "
-            "figure for *what the model actually pays for the ported region "
-            "end-to-end*, but it **overstates the kernel** and should not be read "
-            "as GPU compute time. Separating kernel / copy / AMReX overhead needs "
-            "an Nsight Systems run (`run-profile.sh`).\n")
+            "FMS `mpp_clock` around the solver *call*. On the GPU it folds in the "
+            "OpenMP **`target ... map()` host<->device transfers** and runtime "
+            "overhead around the offloaded loops, not just the kernel. It is "
+            "therefore the right figure for *what the model actually pays for this "
+            "routine end-to-end*, but it **overstates the kernel** and should not "
+            "be read as GPU compute time. Splitting kernel time from the "
+            "host<->device transfers needs an Nsight Systems run "
+            "(`run-profile.sh`).\n")
         if plots.get("continuity"):
             L.append(f"![Continuity]({os.path.basename(plots['continuity'])})\n")
             L.append(
-                "**Left:** continuity as a fraction of the main loop -- the "
-                "Amdahl ceiling on whole-model speedup. **Right:** continuity-only "
-                "throughput ratio (GPU / CPU node) at matched problem sizes; above "
-                "the 1.0 line the GPU wins on its own region even with copies "
-                "included.\n")
+                "**Left:** continuity as a fraction of the main loop. On the "
+                "**CPU** it is ~35-50% (the single largest routine). On the "
+                "**GPU** the same solver is a much smaller share -- not because it "
+                "is slower but because the other offloaded routines (barotropic, "
+                "viscosity) inflate the GPU's denominator. **Right:** "
+                "continuity-only throughput ratio (GPU / CPU node) at matched "
+                "sizes; the GPU wins this routine by ~2x in the clean-comparison "
+                "band (more at small sizes, where the CPU side is only a few "
+                "ranks), transfers included.\n")
         if cont_t:
             L.append(cont_t)
 
@@ -529,11 +768,12 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
     if ft:
         L.append("## Failed / missing runs\n")
         L.append(
-            "These runs produced no FMS `Main loop` timer -- the log never "
-            "reached the timer table, so the run did not complete and is "
-            "excluded from the plots and tables in this report. A failure only "
-            "at the largest GPU size is the expected single-device memory "
-            "ceiling (the GPU ran out of memory); confirm against the run log.\n")
+            "These runs produced no FMS `Main loop` timer, so they did not "
+            "complete and are excluded from the plots and tables above. The "
+            "`cause` column is the failing line from the run's stderr. A GPU "
+            "failure only at the largest size is the single-device memory "
+            "ceiling: one A100 (40 GB) cannot hold the problem, and the "
+            "allocation that tips it over aborts on the first dynamic step.\n")
         L.append(ft)
 
     L.append("## Results: CPU branch\n")
@@ -590,6 +830,10 @@ def main():
                     "timestamped --reports-dir/--label naming")
     ap.add_argument("--nsteps", type=int, default=NSTEPS_DEFAULT,
                     help=f"dynamic steps per run (default {NSTEPS_DEFAULT})")
+    ap.add_argument("--breakdown-i", type=int, default=BREAKDOWN_I_DEFAULT,
+                    help="job-size index for the per-routine breakdown "
+                    f"(default {BREAKDOWN_I_DEFAULT}); falls back to the largest "
+                    "shared size if absent")
     ap.add_argument("--title", default="MOM6 double_gyre GPU vs CPU scaling")
     ap.add_argument("--stack-dir", help="path to turbo-stack checkout, for "
                     "recording commit hashes and build flags in the report")
@@ -634,11 +878,26 @@ def main():
         plots["init"] = plot_init(
             cpu_rows, gpu_rows, os.path.join(outdir, "init.png"))
     if cpu_rows or gpu_rows:
-        plots["continuity"] = plot_continuity(
-            cpu_rows, gpu_rows, os.path.join(outdir, "continuity.png"))
+        plots["continuity"] = plot_routine_isolation(
+            cpu_rows, gpu_rows, CONTINUITY_TIMER,
+            os.path.join(outdir, "continuity.png"), "Continuity")
+        plots["barotropic"] = plot_routine_isolation(
+            cpu_rows, gpu_rows, BAROTROPIC_TIMER,
+            os.path.join(outdir, "barotropic.png"), "Barotropic solver")
+
+    # Per-routine breakdown at one shared problem size (timers required on both).
+    breakdown = None
+    cpu_by_i = {r["i"]: r for r in cpu_rows if r.get("timers")}
+    gpu_by_i = {r["i"]: r for r in gpu_rows if r.get("timers")}
+    shared = sorted(set(cpu_by_i) & set(gpu_by_i))
+    if shared:
+        bi = args.breakdown_i if args.breakdown_i in shared else max(shared)
+        breakdown = (bi, cpu_by_i[bi], gpu_by_i[bi])
+        plots["breakdown"] = plot_breakdown(
+            cpu_by_i[bi], gpu_by_i[bi], os.path.join(outdir, "breakdown.png"))
 
     report = build_report(cpu_rows, gpu_rows, plots, args.nsteps, args.title,
-                          prov=prov, failures=failures)
+                          prov=prov, failures=failures, breakdown=breakdown)
     report_path = os.path.join(outdir, "report.md")
     with open(report_path, "w") as fh:
         fh.write(report)

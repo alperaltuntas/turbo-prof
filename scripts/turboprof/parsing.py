@@ -43,12 +43,13 @@ _TIMER_RE = {
     "total_runtime": re.compile(r"^Total runtime\s+\d+\s+\S+\s+\S+\s+(\S+)"),
     "init":          re.compile(r"^Initialization\s+\d+\s+\S+\s+\S+\s+(\S+)"),
     "termination":   re.compile(r"^Termination\s+\d+\s+\S+\s+\S+\s+(\S+)"),
-    # The GPU port targets the continuity solver; MOM6 wraps it in this
-    # CLOCK_MODULE timer. It only appears when the run sets clock_grain >=
-    # 'MODULE' in input.nml (&fms_nml) -- coarser runs leave it None. CAVEAT:
-    # this is an end-to-end timer. It captures the AMReX call stack PLUS the
-    # device<->host copies around the kernel, not the pure GPU kernel time;
-    # separating those needs Nsight Systems (run-profile.sh).
+    # Continuity solver -- one of the OpenMP-GPU-offloaded routines and the
+    # reviewer's focus. MOM6 wraps it in this CLOCK_MODULE timer, which appears
+    # only when the run sets clock_grain >= 'MODULE' in input.nml (&fms_nml);
+    # coarser runs leave it None. CAVEAT: this is an end-to-end timer around the
+    # offloaded region. It folds in the `!$omp target ... map()` host<->device
+    # transfers and runtime overhead, not just the GPU kernel; separating those
+    # needs Nsight Systems (run-profile.sh).
     "continuity":    re.compile(r"^\(Ocean continuity equation\)\s+\d+\s+\S+\s+\S+\s+(\S+)"),
 }
 _OVERRIDE_RE = {
@@ -58,13 +59,52 @@ _OVERRIDE_RE = {
 }
 
 
+def _parse_timer_line(line):
+    """Parse one FMS mpp_clock row into (name, {tavg, hits, tfrac, grain}).
+
+    The clock name itself contains spaces (e.g. "(Ocean continuity equation)"),
+    so parse from the right: the last nine columns are always
+    ``hits tmin tmax tavg tstd tfrac grain pemin pemax``. Returns None for any
+    line that is not a well-formed timer row.
+    """
+    toks = line.split()
+    if len(toks) < 10:
+        return None
+    nums = toks[-9:]
+    try:
+        hits = int(nums[0])
+        tavg = float(nums[3])
+        tfrac = float(nums[5])
+        grain = int(nums[6])
+        int(nums[7]); int(nums[8])          # pemin/pemax -- presence check
+    except ValueError:
+        return None
+    name = " ".join(toks[:-9])
+    if not name:
+        return None
+    return name, {"tavg": tavg, "hits": hits, "tfrac": tfrac, "grain": grain}
+
+
 def parse_run(path):
-    """Return a dict of timers + parsed overrides, or None if no Main loop timer."""
+    """Return a dict of timers + parsed overrides, or None if no Main loop timer.
+
+    ``timers`` holds the full mpp_clock table keyed by clock name (each value a
+    {tavg, hits, tfrac, grain} dict), so report code can break the main loop
+    down by component. The named scalar fields (main_loop, init, continuity, ...)
+    are kept for convenience and backward compatibility.
+    """
     out = {"main_loop": None, "total_runtime": None, "init": None,
            "termination": None, "continuity": None,
-           "niglobal": None, "njglobal": None, "dt": None}
+           "niglobal": None, "njglobal": None, "dt": None, "timers": {}}
+    in_table = False
     with open(path, errors="replace") as fh:
         for line in fh:
+            if "Tabulating mpp_clock" in line:
+                in_table = True
+            elif in_table:
+                rec = _parse_timer_line(line)
+                if rec and rec[0] not in out["timers"]:
+                    out["timers"][rec[0]] = rec[1]
             for key, rgx in _TIMER_RE.items():
                 if out[key] is None:
                     m = rgx.match(line)
@@ -78,6 +118,29 @@ def parse_run(path):
     if out["main_loop"] is None:
         return None
     return out
+
+
+_ERROR_HINT = re.compile(
+    r"(out of memory|CUDA_ERROR|cuMemAlloc|Fatal Error|FATAL|"
+    r"segmentation|killed|signal|insufficient)", re.IGNORECASE)
+
+
+def _error_reason(err_path):
+    """Best-effort one-line failure cause from a run's stderr (.err) file.
+
+    Returns the most informative error line (the model's CUDA/OOM/abort message
+    is now captured there), or None. The GPU runtime prints thousands of
+    "allocated block" lines before an OOM, so those are skipped.
+    """
+    if not os.path.isfile(err_path):
+        return None
+    hit = None
+    with open(err_path, errors="replace") as fh:
+        for line in fh:
+            line = line.strip()
+            if line and not line.startswith("allocated block") and _ERROR_HINT.search(line):
+                hit = line
+    return hit[:200] if hit else None
 
 
 def collect(run_dir, platform):
@@ -112,6 +175,7 @@ def collect(run_dir, platform):
                 "nk": NK,
                 "gridpoints": ni * nj * NK,
                 "fname": fname,
+                "reason": _error_reason(os.path.join(run_dir, fname[:-4] + ".err")),
             })
             continue
 
@@ -135,6 +199,7 @@ def collect(run_dir, platform):
             "init": parsed["init"],
             "termination": parsed["termination"],
             "continuity": parsed["continuity"],
+            "timers": parsed["timers"],
         })
     rows.sort(key=lambda r: r["i"])
     failures.sort(key=lambda r: r["i"])
@@ -148,9 +213,9 @@ def add_throughput(rows, nsteps):
         # cell-updates per second across the whole device/node
         r["throughput"] = r["gridpoints"] * nsteps / r["main_loop"]
         # Continuity-solver-only metrics, when the timer is present (runs with
-        # clock_grain >= 'MODULE'). This isolates the GPU-ported region from
-        # the whole-model main loop -- see the CAVEAT on the continuity timer
-        # above: the GPU figure here is compute + host<->device copies, not the
+        # clock_grain >= 'MODULE'). This isolates one offloaded routine from the
+        # whole-model main loop -- see the CAVEAT on the continuity timer above:
+        # the GPU figure here is compute + host<->device map transfers, not the
         # bare kernel.
         cont = r.get("continuity")
         if cont:

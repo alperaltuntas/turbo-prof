@@ -37,6 +37,7 @@ import os
 from turboprof.parsing import (
     NK, BLOCK, CPU_PER_NODE, NSTEPS_DEFAULT, collect, add_throughput)
 from turboprof.provenance import gather_provenance, render_provenance, render_stamp
+from turboprof.reporting import DEFAULT_REPORTS_DIR, resolve_outdir
 
 # Reference operating points the team cares about, in gridpoints per GPU.
 REF_POINTS = [
@@ -746,29 +747,6 @@ def build_report(cpu_rows, gpu_rows, plots, nsteps, title, prov=None,
         L.append(render_provenance(prov, include_stamp=False))
 
     return "\n".join(L) + "\n"
-
-
-DEFAULT_REPORTS_DIR = os.path.normpath(
-    os.path.join(os.path.dirname(__file__), "..", "reports"))
-
-
-def resolve_outdir(args, now):
-    """Pick the report directory.
-
-    With --outdir, honor it verbatim (explicit escape hatch). Otherwise build
-    `<reports-dir>/<YYYY-MM-DD-HHMMSS>-<label>` -- the seconds-resolution stamp
-    keeps multiple reports per day distinct and chronologically sorted. On the
-    rare same-second collision, append -2, -3, ... so we never clobber.
-    """
-    if args.outdir:
-        return args.outdir
-    stamp = now.strftime("%Y-%m-%d-%H%M%S")
-    base = os.path.join(args.reports_dir, f"{stamp}-{args.label}")
-    outdir, n = base, 1
-    while os.path.exists(outdir):
-        n += 1
-        outdir = f"{base}-{n}"
-    return outdir
 
 
 def main():

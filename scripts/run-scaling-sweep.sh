@@ -1,8 +1,10 @@
 #!/bin/bash
 # MOM6 double_gyre scaling sweep on Derecho.
 #
-# Usage: sh run-scaling-sweep.sh <cpu|gpu>
+# Usage: sh run-scaling-sweep.sh <turbo_stack> <cpu|gpu>
 #
+#   turbo_stack  path to the turbo-stack checkout holding the build (REQUIRED;
+#                MOM6 is resolved under <turbo_stack>/bin/nvhpc/<build>/MOM6/MOM6)
 #   cpu  weak scaling then saturated node; FMS2 build; up to 128 ranks/node.
 #   gpu  single-device problem-size scan; TIM (GPU-offload) build; 1 rank/GPU.
 #
@@ -13,20 +15,23 @@
 
 module load ncarenv/25.10 cuda/12.9.0 hdf5/1.14.6 nvhpc/25.9 ncarcompilers/1.1.0 netcdf/4.9.3
 
-# Platform comes from the first argument and selects the matching build.
-PLATFORM=${1:-}
+# TURBO_STACK is a REQUIRED first argument -- there is no default. The platform
+# comes second and selects the matching build.
+TURBO_STACK=${1:?usage: sh run-scaling-sweep.sh <turbo_stack> <cpu|gpu>}
+PLATFORM=${2:-}
 case "${PLATFORM}" in
     cpu) MOM6_BUILD=MOM6_using_FMS2 ;;
     gpu) MOM6_BUILD=MOM6_using_TIM ;;
-    *)   echo "usage: $0 <cpu|gpu>" >&2; exit 1 ;;
+    *)   echo "usage: $0 <turbo_stack> <cpu|gpu>" >&2; exit 1 ;;
 esac
 
-# Resolve the stack. This script lives in <repo>/scripts/, so default
-# TURBO_STACK to a sibling 'turbo-stack-for-prof' checkout next to the repo.
-# Override TURBO_STACK in the environment to point elsewhere.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TURBO_STACK="${TURBO_STACK:-$(dirname "$(dirname "$SCRIPT_DIR")")/turbo-stack-for-prof}"
+# Resolve the executable from the given stack and fail early if it is missing.
 MOM6_EXEC=${TURBO_STACK}/bin/nvhpc/${MOM6_BUILD}/MOM6/MOM6
+if [ ! -x "${MOM6_EXEC}" ]; then
+    echo "run-scaling-sweep.sh: MOM6 executable not found or not executable: ${MOM6_EXEC}" >&2
+    echo "  check the turbo_stack argument (got: ${TURBO_STACK})" >&2
+    exit 1
+fi
 
 JOBSIZES="1 2 4 8 16 32 64 128 256 512 1024"
 

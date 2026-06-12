@@ -1,7 +1,11 @@
 #!/bin/bash
 # One-off Nsight Systems profiling run of the double_gyre GPU test.
 #
-# Usage: sh run-profile.sh [jobsize] [kernel_mode]
+# Usage: sh run-profile.sh <turbo_stack> [jobsize] [kernel_mode]
+#          turbo_stack  path to the turbo-stack checkout holding the build
+#                       (its MOM6 lives at <turbo_stack>/bin/nvhpc/MOM6_using_TIM/
+#                       MOM6/MOM6). REQUIRED -- no default; a wrong stack here is
+#                       what silently produced empty traces before.
 #          jobsize      job-size index i (default: 32)
 #          kernel_mode  FORTRAN (default) or AMREX -- which path the ported
 #                       continuity PPM kernels take. AMREX sets the six per-kernel
@@ -23,20 +27,22 @@
 
 module load ncarenv/25.10 cuda/12.9.0 hdf5/1.14.6 nvhpc/25.9 ncarcompilers/1.1.0 netcdf/4.9.3
 
-# Resolve the stack. This script lives in <repo>/scripts/, so default
-# TURBO_STACK to a sibling 'turbo-stack-for-prof' checkout next to the repo.
-# Override TURBO_STACK in the environment to point elsewhere.
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TURBO_STACK="${TURBO_STACK:-$(dirname "$(dirname "$SCRIPT_DIR")")/turbo-stack-for-prof}"
+# Resolve the stack. TURBO_STACK is a REQUIRED first argument
+TURBO_STACK=${1:?usage: sh run-profile.sh <turbo_stack> [jobsize] [kernel_mode]}
 MOM6_EXEC=${TURBO_STACK}/bin/nvhpc/MOM6_using_TIM/MOM6/MOM6
+if [ ! -x "${MOM6_EXEC}" ]; then
+    echo "run-profile.sh: MOM6 executable not found or not executable: ${MOM6_EXEC}" >&2
+    echo "  check the turbo_stack argument (got: ${TURBO_STACK})" >&2
+    exit 1
+fi
 
-i=${1:-32}
-KMODE=$(echo "${2:-FORTRAN}" | tr '[:lower:]' '[:upper:]')
+i=${2:-32}
+KMODE=$(echo "${3:-FORTRAN}" | tr '[:lower:]' '[:upper:]')
 
 export NGPUS=1  # exported so set_gpu_rank can read it in each rank
 RANKS_PER_NODE=1
 
-NSTEPS=20
+NSTEPS=150
 
 # Select which path the ported continuity PPM kernels take. Each var defaults to
 # FORTRAN inside MOM6 (getenv_mode); setting them to AMREX routes the call

@@ -1,7 +1,9 @@
 #!/bin/bash
 # AMReX continuity profiling sweep on Derecho.
 #
-# Usage: sh run-profile-sweep.sh [jobsizes] [modes]
+# Usage: sh run-profile-sweep.sh <turbo_stack> [jobsizes] [modes]
+#          turbo_stack  path to the turbo-stack checkout holding the build
+#                       (REQUIRED; passed straight through to run-profile.sh)
 #          jobsizes  space-separated job-size indices i
 #                    (default: "1 2 4 8 16 32 64 128 256 512 1024", as run-scaling-sweep.sh)
 #          modes     which kernel paths to profile     (default: "FORTRAN AMREX")
@@ -21,17 +23,19 @@
 # A100 (recorded as "did not complete"). Pass a shorter list to scope it down.
 #
 # Examples:
-#   sh run-profile-sweep.sh                       # default sizes, both modes
-#   sh run-profile-sweep.sh "16 32 64 128 256 512"
-#   sh run-profile-sweep.sh "32 128" AMREX        # AMReX path only, two sizes
+#   sh run-profile-sweep.sh "$TURBO_STACK"                   # default sizes, both modes
+#   sh run-profile-sweep.sh "$TURBO_STACK" "16 32 64 128 256 512"
+#   sh run-profile-sweep.sh "$TURBO_STACK" "32 128" AMREX    # AMReX path only, two sizes
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 RUNPROF="${SCRIPT_DIR}/run-profile.sh"
 
-JOBSIZES="${1:-1 2 4 8 16 32 64 128 256 512 1024}"
-MODES="${2:-FORTRAN AMREX}"
+TURBO_STACK=${1:?usage: sh run-profile-sweep.sh <turbo_stack> [jobsizes] [modes]}
+JOBSIZES="${2:-1 2 4 8 16 32 64 128 256 512 1024}"
+MODES="${3:-FORTRAN AMREX}"
 
 echo "=== AMReX continuity profiling sweep @ $(date) ==="
+echo "    stack: ${TURBO_STACK}"
 echo "    sizes: ${JOBSIZES}"
 echo "    modes: ${MODES}"
 echo "    via:   ${RUNPROF}"
@@ -40,7 +44,7 @@ for i in ${JOBSIZES}; do
   for mode in ${MODES}; do
     echo "------------------------------------------------------------------"
     echo "=== profile size=${i} mode=${mode} @ $(date) ==="
-    sh "${RUNPROF}" "${i}" "${mode}"
+    sh "${RUNPROF}" "${TURBO_STACK}" "${i}" "${mode}"
     echo "=== done size=${i} mode=${mode} rc=$? ==="
   done
 done

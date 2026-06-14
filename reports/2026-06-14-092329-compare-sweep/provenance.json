@@ -1,0 +1,59 @@
+{
+  "date_generated": "2026-06-14 09:23:29",
+  "host": "derecho6",
+  "note": null,
+  "stacks": {
+    "dev-turbo-cpu": {
+      "stack_dir": "/glade/work/altuntas/turbo-stack-dev-turbo-cpu",
+      "stack_describe": "2524b9d-dirty",
+      "stack_dirty": true,
+      "mom6_commit": "108388fb608d8b861232bc203fac21ab7bc8f28b",
+      "mom6_describe": "ulm-10623-g108388fb6",
+      "submodule_status": "f6466d899b66198593d6d40b3e8ca3dcbd343d8b dev-utils/gcovlens (heads/main)\n 2c04fb23d0ee9ceef6d61f1021652ccab62e8324 submodules/MARBL (marbl0.48.2)\n+108388fb608d8b861232bc203fac21ab7bc8f28b submodules/MOM6 (ulm-10623-g108388fb6)\n 6dd6d69bdb7c9efd4e210e1c459a897d1b02d21f submodules/amrex (25.11)\n 7e526687b96ca685100f73edf7ef49214d5d5a19 submodules/infra/FMS2 (heads/dev/turbo)\n 1647f85f695cd8f288b6471a99a078f48226efc0 submodules/infra/TIM (1647f85)\n 12ac400e141854b54e5ce08c27c3301ef7d80074 submodules/pFUnit (v4.16.0-31-g12ac400)",
+      "offload_flags": [
+        "FPPFLAGS := $(shell pkg-config --cflags yaml-0.1) -DHAVE_FC_DO_CONCURRENT_LOCAL",
+        "FFLAGS += -mp=gpu -gpu=cc80,mem:separate -stdpar=gpu -Minfo=accel",
+        "CFLAGS += -mp=gpu -gpu=cc80,mem:separate"
+      ]
+    },
+    "iturbo-cpu": {
+      "stack_dir": "/glade/work/altuntas/turbo-stack-iturbo-cpu",
+      "stack_describe": "fabef3b-dirty",
+      "stack_dirty": true,
+      "mom6_commit": "d88ea2c9110b841705c3274dfe41cb1b5d1b4173",
+      "mom6_describe": "ulm-10626-gd88ea2c91",
+      "submodule_status": "f6466d899b66198593d6d40b3e8ca3dcbd343d8b dev-utils/gcovlens (heads/main)\n 2c04fb23d0ee9ceef6d61f1021652ccab62e8324 submodules/MARBL (marbl0.48.2)\n+d88ea2c9110b841705c3274dfe41cb1b5d1b4173 submodules/MOM6 (ulm-10626-gd88ea2c91)\n 6dd6d69bdb7c9efd4e210e1c459a897d1b02d21f submodules/amrex (25.11)\n 7e526687b96ca685100f73edf7ef49214d5d5a19 submodules/infra/FMS2 (heads/dev/turbo)\n+e94bbdde6074a57eb293b2cc95f6af47a6d8a0c7 submodules/infra/TIM (heads/main)\n 12ac400e141854b54e5ce08c27c3301ef7d80074 submodules/pFUnit (v4.16.0-31-g12ac400)",
+      "offload_flags": [
+        "FPPFLAGS := $(shell pkg-config --cflags yaml-0.1) -DHAVE_FC_DO_CONCURRENT_LOCAL",
+        "FFLAGS += -mp=gpu -gpu=cc80,mem:separate -stdpar=gpu -Minfo=accel",
+        "CFLAGS += -mp=gpu -gpu=cc80,mem:separate"
+      ]
+    },
+    "dev-turbo": {
+      "stack_dir": "/glade/work/altuntas/turbo-stack-dev-turbo",
+      "stack_describe": "2524b9d-dirty",
+      "stack_dirty": true,
+      "mom6_commit": "108388fb608d8b861232bc203fac21ab7bc8f28b",
+      "mom6_describe": "ulm-10623-g108388fb6",
+      "submodule_status": "f6466d899b66198593d6d40b3e8ca3dcbd343d8b dev-utils/gcovlens (heads/main)\n 2c04fb23d0ee9ceef6d61f1021652ccab62e8324 submodules/MARBL (marbl0.48.2)\n+108388fb608d8b861232bc203fac21ab7bc8f28b submodules/MOM6 (ulm-10623-g108388fb6)\n 6dd6d69bdb7c9efd4e210e1c459a897d1b02d21f submodules/amrex (25.11)\n 7e526687b96ca685100f73edf7ef49214d5d5a19 submodules/infra/FMS2 (heads/dev/turbo)\n 1647f85f695cd8f288b6471a99a078f48226efc0 submodules/infra/TIM (1647f85)\n 12ac400e141854b54e5ce08c27c3301ef7d80074 submodules/pFUnit (v4.16.0-31-g12ac400)",
+      "offload_flags": [
+        "FPPFLAGS := $(shell pkg-config --cflags yaml-0.1) -DHAVE_FC_DO_CONCURRENT_LOCAL",
+        "FFLAGS += -mp=gpu -gpu=cc80,mem:separate -stdpar=gpu -Minfo=accel",
+        "CFLAGS += -mp=gpu -gpu=cc80,mem:separate"
+      ]
+    },
+    "iturbo": {
+      "stack_dir": "/glade/work/altuntas/turbo-stack-iturbo",
+      "stack_describe": "81e64a1-dirty",
+      "stack_dirty": true,
+      "mom6_commit": "1a8b32aa89c04a2903502f6268effcfb746279d9",
+      "mom6_describe": "ulm-10627-g1a8b32aa8",
+      "submodule_status": "f6466d899b66198593d6d40b3e8ca3dcbd343d8b dev-utils/gcovlens (heads/main)\n 2c04fb23d0ee9ceef6d61f1021652ccab62e8324 submodules/MARBL (marbl0.48.2)\n+1a8b32aa89c04a2903502f6268effcfb746279d9 submodules/MOM6 (ulm-10627-g1a8b32aa8)\n 6dd6d69bdb7c9efd4e210e1c459a897d1b02d21f submodules/amrex (25.11)\n 7e526687b96ca685100f73edf7ef49214d5d5a19 submodules/infra/FMS2 (heads/dev/turbo)\n+b3a1315ae319d437e2745dd099d6bb40ede085fd submodules/infra/TIM (heads/docs/io-diag-pio-roadmap)\n 12ac400e141854b54e5ce08c27c3301ef7d80074 submodules/pFUnit (v4.16.0-31-g12ac400)",
+      "offload_flags": [
+        "FPPFLAGS := $(shell pkg-config --cflags yaml-0.1) -DHAVE_FC_DO_CONCURRENT_LOCAL",
+        "FFLAGS += -mp=gpu -gpu=cc80,mem:separate -stdpar=gpu -Minfo=accel",
+        "CFLAGS += -mp=gpu -gpu=cc80,mem:separate"
+      ]
+    }
+  }
+}

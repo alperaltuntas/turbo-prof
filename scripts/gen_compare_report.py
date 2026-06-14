@@ -58,6 +58,17 @@ CONFIGS = [
 ]
 ABBREV = {c[0]: c[1] for c in CONFIGS}
 
+# Human-facing labels used in every plot legend (and surfaced in the config
+# table so the mapping from each config's branch/build to its legend label is
+# explicit). Encodes the kernel language and -- for the dev/turbo GPU build --
+# how the Fortran is offloaded.
+DISPLAY = {
+    "dev_turbo_CPU":    "Fortran (CPU)",
+    "iturbo_CPU_amrex": "AMReX/C++ (CPU)",
+    "dev_turbo_GPU":    "Fortran [do concurrent + OMP target] (GPU)",
+    "iturbo_GPU_amrex": "AMReX/C++ (GPU)",
+}
+
 DEFAULT_STACKS = {
     "dev-turbo-cpu": "/glade/work/altuntas/turbo-stack-dev-turbo-cpu",
     "iturbo-cpu":    "/glade/work/altuntas/turbo-stack-iturbo-cpu",
@@ -124,7 +135,7 @@ def _annotate_scaling(ax):
             ha="right", va="top", fontsize=8, color="indianred", style="italic")
     ax.text(boundary, 0.93, "  CPU 128 ranks fixed ->", transform=trans,
             ha="left", va="top", fontsize=8, color="indianred", style="italic")
-    ax.text(0.015, 0.015, "GPU: 1 device throughout", transform=ax.transAxes,
+    ax.text(0.075, 0.015, "GPU: 1 device throughout", transform=ax.transAxes,
             ha="left", va="bottom", fontsize=8, color="dimgray", style="italic")
 
 
@@ -141,7 +152,7 @@ def plot_throughput(rows_by_cfg, outpath):
             continue
         drawn = True
         ax.plot([r["gridpoints"] for r in rows], [r["throughput"] for r in rows],
-                label=tag, **_STYLE[tag])
+                label=DISPLAY[tag], **_STYLE[tag])
     if not drawn:
         plt.close(fig)
         return None
@@ -156,7 +167,7 @@ def plot_throughput(rows_by_cfg, outpath):
     # Headroom so the weak-scaling annotation near the top doesn't overlay data.
     ax.set_ylim(top=ax.get_ylim()[1] * 3.0)
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(outpath, dpi=120)
     plt.close(fig)
@@ -182,7 +193,7 @@ def plot_kernel_throughput(rows_by_cfg, outpath, nsteps):
             continue
         drawn = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                label=tag, **_STYLE[tag])
+                label=DISPLAY[tag], **_STYLE[tag])
     if not drawn:
         plt.close(fig)
         return None
@@ -193,9 +204,9 @@ def plot_kernel_throughput(rows_by_cfg, outpath, nsteps):
     ax.set_xlabel("Problem size (total gridpoints = NI x NJ x 100)")
     ax.set_ylabel("Kernel-only throughput (cell-updates / s)")
     ax.set_title("Continuity kernel throughput (excludes bridge)")
-    ax.set_ylim(top=ax.get_ylim()[1] * 3.0)  # headroom for the scaling labels
+    ax.set_ylim(top=ax.get_ylim()[1] * 4.5)  # headroom for the scaling labels
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(outpath, dpi=120)
     plt.close(fig)
@@ -214,7 +225,7 @@ def plot_continuity(rows_by_cfg, outpath):
             continue
         drawn = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                label=tag, **_STYLE[tag])
+                label=DISPLAY[tag], **_STYLE[tag])
     if not drawn:
         plt.close(fig)
         return None
@@ -228,7 +239,7 @@ def plot_continuity(rows_by_cfg, outpath):
                  "(iturbo includes bridge)")
     ax.set_ylim(top=ax.get_ylim()[1] * 3.0)  # headroom for the scaling labels
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(outpath, dpi=120)
     plt.close(fig)
@@ -254,7 +265,7 @@ def plot_kernels(rows_by_cfg, outpath):
                 continue
             drawn = True
             ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                    label=tag, **_STYLE[tag])
+                    label=DISPLAY[tag], **_STYLE[tag])
         _mark_reference_points(ax, node_line=True, text=False)
         ax.set_xscale("log")
         ax.set_yscale("log")
@@ -262,7 +273,7 @@ def plot_kernels(rows_by_cfg, outpath):
         ax.grid(True, which="both", alpha=0.3)
         ax.set_xlabel("gridpoints")
         ax.set_ylabel("wall time (s)")
-        ax.legend(fontsize=8)
+        ax.legend(fontsize=9)
     flat[len(KERNELS)].axis("off")
     if not drawn:
         plt.close(fig)
@@ -315,7 +326,8 @@ def plot_kernel_speedup(rows_by_cfg, outpath):
             continue
         drawn = True
         ax.plot([p[0] for p in pts], [p[1] for p in pts],
-                label=f"{cfg_tag} / {base_tag}", **_STYLE[cfg_tag])
+                label=f"{DISPLAY[cfg_tag]}\n   / {DISPLAY[base_tag]}",
+                **_STYLE[cfg_tag])
     if not drawn:
         plt.close(fig)
         return None
@@ -328,9 +340,9 @@ def plot_kernel_speedup(rows_by_cfg, outpath):
     ax.set_title("iturbo vs dev/turbo: continuity kernels only "
                  "(excludes bridge)")
     _lo, _hi = ax.get_ylim()  # headroom for the scaling labels (linear axis)
-    ax.set_ylim(top=_hi + 0.20 * (_hi - _lo))
+    ax.set_ylim(top=_hi + 0.25 * (_hi - _lo))
     ax.grid(True, which="both", alpha=0.3)
-    ax.legend()
+    ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(outpath, dpi=120)
     plt.close(fig)
@@ -356,14 +368,17 @@ def fmt_ratio(base, val):
 
 
 def config_table(stacks):
-    """The four configurations: executable origin, resources, kernel routing."""
-    head = ("| config | abbrev | stack | resources | PPM kernel routing |\n"
-            "|---|---|---|---|---|\n")
+    """The four configurations: plot label, executable origin, resources, kernel
+    routing. The `plot label` column is the legend label used in every figure."""
+    head = ("| config | abbrev | plot label | stack | resources "
+            "| PPM kernel routing |\n"
+            "|---|---|---|---|---|---|\n")
     body = ""
     for tag, abbrev, platform, _, stack in CONFIGS:
         res = "min(i, 128) ranks" if platform == "cpu" else "1 rank + 1 GPU"
         routing = ("AMReX (`*_MODE=AMREX`)" if "amrex" in tag else "Fortran")
-        body += (f"| `{tag}` | {abbrev} | `{stack}` (`{stacks.get(stack, '?')}`) "
+        body += (f"| `{tag}` | {abbrev} | {DISPLAY[tag]} "
+                 f"| `{stack}` (`{stacks.get(stack, '?')}`) "
                  f"| {res} | {routing} |\n")
     return head + body
 

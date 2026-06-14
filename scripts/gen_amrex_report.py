@@ -631,42 +631,6 @@ def build_report(runs, nsteps, title, prov, plots=None):
     return "\n".join(L)
 
 
-# Matplotlib-capable pythons to try if the launching interpreter has none. The
-# nvhpc python (needed for the right nsys) lacks matplotlib, so by default plotting
-# would silently skip; instead we re-exec under one of these. Override with
-# MATPLOTLIB_PYTHON, or pass --no-plots to opt out entirely.
-_MPL_PYTHONS = [
-    os.environ.get("MATPLOTLIB_PYTHON", ""),
-    "/glade/u/apps/opt/conda/envs/npl/bin/python",
-]
-
-
-def _reexec_with_matplotlib_if_needed(args):
-    """If plots are wanted but matplotlib is missing here, re-exec under a python
-    that has it (keeping argv, incl. the inherited PATH so `nsys` still resolves).
-    Guarded by an env sentinel so we re-exec at most once."""
-    if "--no-plots" in sys.argv or os.environ.get("GEN_AMREX_REEXEC"):
-        return
-    try:
-        import matplotlib  # noqa: F401
-        return
-    except ImportError:
-        pass
-    for py in _MPL_PYTHONS:
-        if not py or not os.path.exists(py) or os.path.realpath(py) == os.path.realpath(sys.executable):
-            continue
-        # Confirm the candidate actually imports matplotlib before committing.
-        chk = subprocess.run([py, "-c", "import matplotlib"],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if chk.returncode == 0:
-            sys.stderr.write(f"NOTE: re-exec under {py} for matplotlib (figures).\n")
-            os.environ["GEN_AMREX_REEXEC"] = "1"
-            os.execv(py, [py, os.path.abspath(__file__)] + sys.argv[1:])
-    sys.stderr.write(
-        "WARNING: no matplotlib-capable python found; rendering report WITHOUT "
-        "figures. Set MATPLOTLIB_PYTHON or pass --no-plots.\n")
-
-
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -691,9 +655,6 @@ def main():
     ap.add_argument("--no-plots", action="store_true",
                     help="skip figures (e.g. in an env without matplotlib)")
     args = ap.parse_args()
-
-    if not args.no_plots:
-        _reexec_with_matplotlib_if_needed(args)
 
     now = datetime.datetime.now()
     gen_time = args.date or now.isoformat(sep=" ", timespec="seconds")

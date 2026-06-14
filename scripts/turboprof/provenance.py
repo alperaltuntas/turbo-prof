@@ -69,6 +69,28 @@ def gather_provenance(stack_dir, note, date):
     return prov
 
 
+def gather_provenance_multi(stacks, note, date):
+    """Capture provenance for several stacks at once (comparison-sweep reports).
+
+    ``stacks`` maps a short name (e.g. 'dev-turbo', 'iturbo-cpu') to a
+    turbo-stack checkout path. Returns the usual top-level stamp fields plus a
+    ``stacks`` dict of per-stack gather_provenance() records (their duplicate
+    stamp fields trimmed).
+    """
+    prov = {
+        "date_generated": date or datetime.date.today().isoformat(),
+        "host": socket.gethostname(),
+        "note": note,
+        "stacks": {},
+    }
+    for name, stack_dir in stacks.items():
+        sub = gather_provenance(stack_dir, None, date)
+        for k in ("date_generated", "host", "note"):
+            sub.pop(k, None)
+        prov["stacks"][name] = sub
+    return prov
+
+
 def render_stamp(prov):
     """One-line 'generated on' stamp for the top of a report.
 
@@ -115,4 +137,28 @@ def render_provenance(prov, include_stamp=True):
                  "changes when this report was generated, so the commit hash "
                  "does not fully capture the build. The GPU build flags above "
                  "are recorded explicitly for this reason.")
+    return "\n".join(L) + "\n"
+
+
+def render_provenance_multi(prov, include_stamp=True):
+    """Markdown 'Provenance' section from a gather_provenance_multi() dict.
+
+    One subsection per stack, each rendered with the single-stack logic.
+    """
+    L = ["## Provenance\n"]
+    if include_stamp:
+        L.append(f"- **Generated:** {prov['date_generated']} on `{prov['host']}`")
+    if prov.get("note"):
+        L.append(f"- **Note:** {prov['note']}")
+    L.append("")
+    for name, sub in prov.get("stacks", {}).items():
+        L.append(f"### Stack: {name}\n")
+        # Strip the sub-renderer's own "## Provenance" heading line; the
+        # per-stack dirty-tree warning (if any) comes along with the body.
+        body = render_provenance(sub, include_stamp=False)
+        L.append(body.split("\n", 2)[2].rstrip())
+        L.append("")
+    if not prov.get("stacks"):
+        L.append("- _Software-stack provenance not recorded "
+                 "(re-run with `--stack NAME=PATH`)._")
     return "\n".join(L) + "\n"

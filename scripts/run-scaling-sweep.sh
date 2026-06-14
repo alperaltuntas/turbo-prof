@@ -101,6 +101,8 @@ LAYOUT = ${lx},${ly}
 TIMEUNIT = ${dt}
 ENERGYSAVEDAYS = 50
 #override DAYMAX = 150
+#override READ_DEPTH_LIST = False
+#override RESTART_CONTROL = -1
 EOF
     # File label index
     printf -v i0 "%03d" "$i"

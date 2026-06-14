@@ -66,6 +66,29 @@ interpretation belongs. This skill fills those anchors with commentary that is
 - `init` — the GPU init trend and what it implies for the memory ceiling.
 - `failures` — what the failure cause implies (e.g. the device memory ceiling).
 
+For **comparison-sweep reports** (`gen_compare_report.py`, four configs =
+{dev/turbo, iturbo-AMReX} × {CPU, GPU}), the anchors are:
+
+- `key-finding` — the headline: is iturbo (AMReX kernels) faster or
+  slower than its dev/turbo baseline on the same hardware, and does the answer
+  change with problem size?
+- `methodology` — anything about this run that qualifies the comparison
+  (missing sizes, large repeat spread, mixed timer sources).
+- `throughput` — how the four curves order and where they diverge.
+- `speedup` — the iturbo-vs-dev/turbo ratios: above/below parity, and the
+  trend with size (e.g. fixed overhead amortizing away, or growing).
+- `head-to-head` — read the per-size speedup columns; name where each variant
+  wins or loses.
+- `continuity` — the routine the AMReX port targets: how its cost compares
+  across configs and scales with size (GPU timers fold in transfers — same
+  caveat as ever).
+- `kernels` / `kernel-snapshot` — per-kernel story: which ported kernels are
+  faster/slower under AMReX, kernel time vs the surrounding continuity time
+  (gap = repacking/bridge overhead is a *hypothesis* unless Nsight-confirmed).
+- `ocean-stats` — whether the variants computed the same physics; flag any
+  "differ" rows prominently.
+- `failures` — what the failure cause implies.
+
 ## Grounding rules (non-negotiable)
 
 - **Cite only numbers that appear in `report.md` or `results.csv`.** Never

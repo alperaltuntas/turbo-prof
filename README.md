@@ -11,14 +11,21 @@ software stack itself. Point the scripts at a separate turbo-stack checkout.
 scripts/
   run-scaling-sweep.sh   scaling sweep; pass cpu or gpu (cpu = weak scaling
                          then saturated node; gpu = single-device problem scan)
+  run-compare-sweep.sh   comparison sweep: one of four executable configs
+                         (dev_turbo/iturbo_amrex x CPU/GPU)
+                         across the job sizes, N repeats per point
   run-profile.sh         one-off Nsight Systems profiling run
   job-sweep-gpu.sh       PBS wrapper: submit the gpu sweep (1 GPU, ncpus=16)
   job-sweep-cpu.sh       PBS wrapper: submit the cpu sweep (1 node, ncpus=128)
+  job-compare-gpu.sh     PBS wrapper: comparison sweep, the three GPU configs
+  job-compare-cpu.sh     PBS wrapper: comparison sweep, the three CPU configs
   gen_report.py          parse run logs -> CSV + plots + facts-only Markdown report
+  gen_compare_report.py  parse comparison-sweep logs -> four-config report
   strip_commentary.py    recover the facts-only report from an annotated one
 docs/
   METHODOLOGY.md         scaling methodology (weak/strong, fixed-step trick)
   REPORTING.md           the facts-vs-commentary two-layer report design
+  COMPARE_SWEEP.md       the four-config comparison sweep (configs, timer sources)
 reports/
   <date-time>-<label>/   one committed report per run
 ```
@@ -37,6 +44,28 @@ Each wrapper `cd`s to the run directory (which holds `MOM_input`, `input.nml`,
 logs there. `run-scaling-sweep.sh` self-locates the stack: it defaults `TURBO_STACK`
 to a sibling `turbo-stack-for-prof` checkout next to this repo. Set `TURBO_STACK`
 in the environment to point elsewhere.
+
+## The comparison sweep
+
+The comparison sweep runs **four executable configurations** — {dev/turbo,
+iturbo with AMReX kernels} × {CPU, GPU} — across
+the same job-size sweep, repeating each point N times (default 3) and parsing
+both the FMS mpp_clock tables and (for AMReX runs) the AMReX TinyProfiler
+table. See `docs/COMPARE_SWEEP.md` for the configs, timer sources, and caveats.
+
+```bash
+qsub /path/to/turbo-prof/scripts/job-compare-cpu.sh
+qsub /path/to/turbo-prof/scripts/job-compare-gpu.sh
+# subset / smoke test:
+qsub -v CONFIGS="iturbo_GPU_amrex",JOBSIZES="1 4",NRUNS=1 \
+    /path/to/turbo-prof/scripts/job-compare-gpu.sh
+```
+
+then, once both jobs finish:
+
+```bash
+python3 gen_compare_report.py --run-dir <run_dir> --label compare-sweep
+```
 
 ## Generating a report
 

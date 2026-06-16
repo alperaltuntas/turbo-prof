@@ -50,230 +50,37 @@ skip figures (the facts tables render either way).
 """
 
 import argparse
-import csv
 import datetime
 import glob
 import os
 import re
-import subprocess
 import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from turboprof.parsing import parse_run
 from turboprof.provenance import gather_provenance, render_provenance, render_stamp
 from turboprof.reporting import DEFAULT_REPORTS_DIR, resolve_outdir
+# nsys (.nsys-rep) extraction + kernel tables are shared with the
+# nsys-compare report; they live in turboprof.nsys.
+from turboprof.nsys import (
+    PORTED_KERNELS, PORTED_KERNEL_NOTES, REPACK_KERNELS, summarize_rep)
 
 NSTEPS_DEFAULT = 20
 MODES = ("fortran", "amrex")
-NSYS = os.environ.get("NSYS", "nsys")
-
-# Ported PPM compute kernels, keyed by the demangled-name substring (MOM::<fn>).
-# reconstruction_x/y each appear as two ParallelFor lambdas (slope + edge); both map
-# to the same key and are summed. edge_thickness routines delegate to reconstruction,
-# so they rarely appear as their own kernels; cw84 only with a monotonic limiter.
-PORTED_KERNELS = [
-    ("PPM_reconstruction_x",      "PPM reconstruction x (zonal)"),
-    ("PPM_reconstruction_y",      "PPM reconstruction y (meridional)"),
-    ("ppm_limit_pos",             "PPM limiter: positive-definite"),
-    ("ppm_limit_cw84",            "PPM limiter: CW84 monotonic"),
-    ("zonal_edge_thickness",      "zonal edge thickness"),
-    ("meridional_edge_thickness", "meridional edge thickness"),
-]
-# Static facts about the continuity PPM dispatch (from the MOM6/TIM source, not
-# from any run): three of the six entry points launch their own kernel only on a
-# code path that a given run may not take, so a zero is structural rather than a
-# missing measurement. Surfaced as a Note column. These describe the code, not the
-# experiment -- interpretation of the run stays in the commentary anchors.
-PORTED_KERNEL_NOTES = {
-    "ppm_limit_cw84":
-        "limiter selected by MONOTONIC_CONTINUITY; the alternative is the "
-        "positive-definite limiter",
-    "zonal_edge_thickness":
-        "wrapper over PPM_reconstruction_x; launches its own kernel only on the "
-        "1st-order-upwind path",
-    "meridional_edge_thickness":
-        "wrapper over PPM_reconstruction_y; launches its own kernel only on the "
-        "1st-order-upwind path",
-}
-# Bridge data-repacking kernels (host Fortran layout <-> AMReX Array4 layout).
-REPACK_KERNELS = [
-    ("copy_FortranHost_to_array4", "host -> Array4 pack (H2D side)"),
-    ("copy_array4_to_FortranHost", "Array4 -> host unpack (D2H side)"),
-]
-# API names: which memcpy entry points belong to the AMReX bridge vs OpenMP offload.
-BRIDGE_COPY_APIS = ("cudaMemcpyAsync", "cudaMemcpy")
-OPENMP_COPY_APIS = ("cuMemcpy2DAsync_v2", "cuMemcpyDtoHAsync_v2",
-                    "cuMemcpyHtoDAsync_v2", "cuMemcpyDtoDAsync_v2")
-
-
-# --- nsys CSV extraction ----------------------------------------------------
-
-def _report_filebase(report):
-    """nsys turns 'cuda_gpu_kern_sum:mangled' into the file suffix '..._mangled'."""
-    return report.replace(":", "_")
-
-
-def _nsys_csv(rep_path, reports, workdir):
-    """Run `nsys stats` on a .nsys-rep; return {report: [row dicts]} via -o CSVs."""
-    base = os.path.join(workdir, os.path.splitext(os.path.basename(rep_path))[0])
-    cmd = [NSYS, "stats", "--force-export=true", "--format", "csv", "-o", base]
-    for r in reports:
-        cmd += ["--report", r]
-    cmd.append(rep_path)
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    out = {}
-    for r in reports:
-        path = f"{base}_{_report_filebase(r)}.csv"
-        rows = []
-        if os.path.exists(path):
-            with open(path, newline="") as fh:
-                for row in csv.DictReader(fh):
-                    rows.append({(k or "").strip(): (v or "").strip()
-                                 for k, v in row.items()})
-        out[r] = rows
-    if not any(out[r] for r in reports):
-        sys.stderr.write(
-            f"WARNING: nsys produced no rows for {os.path.basename(rep_path)}.\n"
-            f"  Likely an nsys version mismatch (need the recorder's nsys, e.g.\n"
-            f"  nvhpc-25.9 >=2025.5). Set NSYS=/path/to/nsys. nsys said:\n"
-            + "  " + (proc.stdout.decode(errors="replace")[-500:] if proc.stdout else "")
-            + "\n")
-    return out
-
-
-def _demangle(names):
-    """Batch-demangle C++ symbols with c++filt; returns list aligned to input."""
-    if not names:
-        return []
-    try:
-        p = subprocess.run(["c++filt"], input="\n".join(names).encode(),
-                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        out = p.stdout.decode(errors="replace").splitlines()
-        if len(out) == len(names):
-            return out
-    except FileNotFoundError:
-        pass
-    return names  # c++filt missing: fall back to raw (classification may degrade)
-
-
-def _num(s):
-    s = (s or "").replace(",", "").strip()
-    try:
-        return float(s)
-    except ValueError:
-        return 0.0
-
-
-def _col(row, *names):
-    norm = {re.sub(r"\s+", "", k).lower(): v for k, v in row.items()}
-    for n in names:
-        v = norm.get(re.sub(r"\s+", "", n).lower())
-        if v is not None:
-            return v
-    return ""
-
-
-# --- kernel classification --------------------------------------------------
-
-def classify_kernel(name):
-    """Bucket by demangled name: 'ported' | 'repack' | 'amrex' | 'openmp'."""
-    if "MOM::" in name:
-        return "ported"
-    if any(k in name for k, _ in REPACK_KERNELS):
-        return "repack"
-    if "amrex::" in name or "turbotmp::" in name:
-        return "amrex"
-    return "openmp"
-
-
-def _key_for(name, table):
-    for key, _ in table:
-        if key.lower() in name.lower():
-            return key
-    return None
-
-
-def summarize_kernels(kern_rows):
-    """Aggregate cuda_gpu_kern_sum:mangled rows (names demangled) into buckets."""
-    names = [_col(r, "Name") for r in kern_rows]
-    demangled = _demangle(names)
-    buckets = {b: 0.0 for b in ("ported", "repack", "amrex", "openmp")}
-    per_ported, per_repack = {}, {}
-    for row, name in zip(kern_rows, demangled):
-        if not name:
-            continue
-        t = _num(_col(row, "Total Time (ns)", "Total Time"))
-        n = _num(_col(row, "Instances", "Count"))
-        b = classify_kernel(name)
-        buckets[b] += t
-        if b == "ported":
-            k = _key_for(name, PORTED_KERNELS)
-            if k:
-                d = per_ported.setdefault(k, {"ns": 0.0, "inst": 0.0})
-                d["ns"] += t; d["inst"] += n
-        elif b == "repack":
-            k = _key_for(name, REPACK_KERNELS)
-            if k:
-                d = per_repack.setdefault(k, {"ns": 0.0, "inst": 0.0})
-                d["ns"] += t; d["inst"] += n
-    return {"buckets": buckets, "per_ported": per_ported, "per_repack": per_repack}
-
-
-def summarize_memops(time_rows, size_rows):
-    def direction(op):
-        o = op.lower()
-        if "host-to-device" in o or "htod" in o:
-            return "htod"
-        if "device-to-host" in o or "dtoh" in o:
-            return "dtoh"
-        return "other"
-    agg = {d: {"ns": 0.0, "mb": 0.0} for d in ("htod", "dtoh", "other")}
-    for row in time_rows:
-        agg[direction(_col(row, "Operation"))]["ns"] += \
-            _num(_col(row, "Total Time (ns)", "Total Time"))
-    for row in size_rows:
-        agg[direction(_col(row, "Operation"))]["mb"] += \
-            _num(_col(row, "Total (MB)", "Total"))
-    return agg
-
-
-def summarize_api_copies(api_rows):
-    """Split memcpy API time into bridge (cudaMemcpyAsync) vs OpenMP (cuMemcpy*)."""
-    agg = {"bridge": {"ns": 0.0, "calls": 0.0}, "openmp": {"ns": 0.0, "calls": 0.0}}
-    for row in api_rows:
-        nm = _col(row, "Name")
-        t = _num(_col(row, "Total Time (ns)", "Total Time"))
-        c = _num(_col(row, "Num Calls", "Count", "Instances"))
-        if nm in BRIDGE_COPY_APIS:
-            agg["bridge"]["ns"] += t; agg["bridge"]["calls"] += c
-        elif nm in OPENMP_COPY_APIS:
-            agg["openmp"]["ns"] += t; agg["openmp"]["calls"] += c
-    return agg
 
 
 # --- collection -------------------------------------------------------------
 
 def collect(prof_dir, workdir):
-    reports = ["cuda_gpu_kern_sum:mangled", "cuda_gpu_mem_time_sum",
-               "cuda_gpu_mem_size_sum", "cuda_api_sum"]
     runs = {}
     for rep in sorted(glob.glob(os.path.join(prof_dir, "prof_*.nsys-rep"))):
         m = re.search(r"prof_(fortran|amrex)_(\d+)\.nsys-rep$", os.path.basename(rep))
         if not m:
             continue
         mode, i = m.group(1), int(m.group(2))
-        csvs = _nsys_csv(rep, reports, workdir)
         out_path = os.path.join(prof_dir, f"prof_{mode}_{i:03d}.out")
-        runs[(mode, i)] = {
-            "mode": mode, "i": i,
-            "kern": summarize_kernels(csvs["cuda_gpu_kern_sum:mangled"]),
-            "mem": summarize_memops(csvs["cuda_gpu_mem_time_sum"],
-                                    csvs["cuda_gpu_mem_size_sum"]),
-            "api": summarize_api_copies(csvs["cuda_api_sum"]),
-            "timers": parse_run(out_path) if os.path.exists(out_path) else None,
-            "completed": bool(parse_run(out_path)) if os.path.exists(out_path) else False,
-        }
+        runs[(mode, i)] = {"mode": mode, "i": i,
+                           **summarize_rep(rep, out_path, workdir)}
     return runs
 
 

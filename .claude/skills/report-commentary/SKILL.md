@@ -89,6 +89,28 @@ For **comparison-sweep reports** (`gen_compare_report.py`, four configs =
   "differ" rows prominently.
 - `failures` — what the failure cause implies.
 
+For **nsys-compare reports** (`gen_nsys_compare_report.py`, the two GPU
+configs re-run under Nsight Systems — this is the *Nsight-confirmed* counterpart
+to the compare-sweep `kernels` hypothesis above), the anchors are:
+
+- `key-finding` — the headline from the traces: across the continuity PPM **leaf**
+  kernels (`PPM_reconstruction_x/y`, the pos/CW84 limiters), how the Fortran
+  `do concurrent` compute compares to the C++ AMReX `ParallelFor` compute — which
+  path's leaves are faster and by how much. This is the kernel-compute number that
+  confirms-or-refutes the compare-sweep "the ported kernels themselves are
+  faster/slower" hypothesis (PCIe copies and bridge repack excluded by design).
+- `methodology` — qualify the comparison: it is **compute only**, restricted to
+  the leaf kernels that appear standalone in *both* builds (wrappers inlined, the
+  un-ported solver bulk and the AMReX bridge are absent); per-routine GPU loops are
+  summed; the launch counts are shown so any non-clean pairing (mismatched
+  launches) is visible; and everything is read from the dumped
+  `*_cuda_gpu_kern_sum.csv` (no nsys at report time).
+- `ratio-trend` — read the Fortran/AMReX ratio across grid sizes: is one path's
+  advantage fixed, or does it grow/shrink as the problem scales?
+- `leaf-comparison` — the per-leaf breakdown: which individual leaves drive the
+  overall difference, and whether any leaf bucks the aggregate trend (e.g. one
+  reconstruction faster under AMReX while a limiter is faster under Fortran).
+
 ## Grounding rules (non-negotiable)
 
 - **Cite only numbers that appear in `report.md` or `results.csv`.** Never

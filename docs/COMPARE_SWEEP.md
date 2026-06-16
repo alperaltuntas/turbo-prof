@@ -115,3 +115,77 @@ override with repeatable `--stack NAME=PATH` flags (names: `dev-turbo-cpu`,
 facts-only `report.md` (with `<!-- commentary: NAME -->` anchors for the
 report-commentary skill), `results.csv` with one row per (config, size,
 repeat), `provenance.json` covering all four stacks, and the plot PNGs.
+
+## Nsight-profiled variant (leaf-kernel compute)
+
+The sweep above sources its per-kernel times from stdout (mpp_clock /
+TinyProfiler), which time each continuity call **end-to-end** — they fold the
+GPU compute together with the host<->device PCIe copies the AMReX bridge (and
+the OpenMP offload) perform around it. For a kernel-level view that isolates the
+**compute** itself, the **two GPU configs** (`dev_turbo_GPU` vs
+`iturbo_GPU_amrex`) are re-run under Nsight Systems by a **dedicated** script,
+`run-nsys-compare-sweep.sh` (PBS wrapper `job-nsys-compare-gpu.sh`), and parsed
+by `gen_nsys_compare_report.py`. The profiling sweep is a separate script --
+exactly as `run-profile.sh` is separate from `run-scaling-sweep.sh` -- so the
+plain comparison sweep's producer (`run-compare-sweep.sh`) is never touched and
+keeps reproducing the previous report bit-for-bit. For the single-build AMReX
+continuity story (compute vs. data movement, bridge repack, PCIe) see
+`docs/AMREX_PROFILING.md`.
+
+**Leaf kernels only, by design.** The report compares **only** the continuity
+PPM *leaf* kernels — the bottom-of-tree compute kernels that appear as standalone
+GPU kernels in *both* builds: `PPM_reconstruction_x`, `PPM_reconstruction_y`, and
+the positive-definite / CW84 limiters (`ppm_limit_pos`, `ppm_limit_cw84`). These
+are the only continuity kernels that pair apples-to-apples: the `edge_thickness`
+wrappers are inlined in dev/turbo, and the rest of the solver (`mass_flux`,
+`flux_adjust`, `set_*_bt_cont`, `convergence`) was never ported to AMReX, so it
+has no `ParallelFor` counterpart. Excluded by construction: those wrappers, the
+un-ported solver bulk, and the AMReX **bridge** (repack kernels + host<->device
+copies). This is kernel **compute only** — `dev_turbo_GPU` = Fortran
+`do concurrent`, `iturbo_GPU_amrex` = C++ AMReX `ParallelFor`.
+
+**GPU-only, by construction.** Per-kernel device timers are GPU-only, so
+`run-nsys-compare-sweep.sh` rejects CPU configs (use `run-compare-sweep.sh`
+for those).
+
+**Pairing across both builds.** nsys auto-demangles the kernel names, and the
+`MOM::<routine>` reference survives in both the dev/turbo nvkernel names
+(`mom_continuity_ppm_ppm_reconstruction_x_<line>_gpu`) and the iturbo AMReX names
+(`...MOM::PPM_reconstruction_x(...)...`), so a substring match isolates each leaf
+on both sides. A routine may emit several GPU loops; they are summed, and the
+launch count is shown for both sides so any non-clean pairing (mismatched
+launches) is visible.
+
+**CSV-only at report time.** Every figure and table is derived from the per-trace
+`prof_<config>_<i0>_run<r>_cuda_gpu_kern_sum.csv` files that
+`run-nsys-compare-sweep.sh` dumps next to each trace (the kernel summary nsys
+auto-demangles). So the report needs **only matplotlib** — no `nsys` and no
+`c++filt` at report time. For mpp_clock-based continuity/throughput comparisons
+(untraced, representative) use `gen_compare_report.py`. Traces are kept small with
+`NSTEPS=40` (vs 150).
+
+Running and generating:
+
+```bash
+# Profiled sweep: job-nsys-compare-gpu.sh runs the GPU configs under
+# `nsys profile --stats`, writing prof_<config>_<i0>_run<r>.{nsys-rep,out,err}
+# and dumping per-trace *_cuda_gpu_kern_sum.csv next to each (DUMP_CSV=0 to skip).
+# Traced runs are slower and the .nsys-rep files are large; scope down with a
+# shorter JOBSIZES for a quick check.
+qsub /path/to/turbo-prof/scripts/job-nsys-compare-gpu.sh
+# quick check, e.g.:
+qsub -v JOBSIZES="4 16",NRUNS=1 \
+    /path/to/turbo-prof/scripts/job-nsys-compare-gpu.sh
+
+# Report (matplotlib only — reads the dumped CSVs, no nsys needed):
+module load conda && conda activate npl
+cd /path/to/turbo-prof/scripts
+python3 gen_nsys_compare_report.py \
+    --run-dir /glade/derecho/scratch/$USER/double_gyre_new \
+    --label nsys-compare
+```
+
+The report directory holds `report.md` (anchors below), `leaf_ratio.png`,
+`results.csv` (one row per config/size/leaf with the summed GPU time `gpu_ms` and
+`launches`), and a `provenance.json` covering the two GPU stacks. Commentary
+anchors: `key-finding`, `methodology`, `ratio-trend`, `leaf-comparison`.

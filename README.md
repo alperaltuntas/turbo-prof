@@ -21,6 +21,11 @@ scripts/
   job-compare-cpu.sh     PBS wrapper: comparison sweep, the three CPU configs
   gen_report.py          parse run logs -> CSV + plots + facts-only Markdown report
   gen_compare_report.py  parse comparison-sweep logs -> four-config report
+  run-nsys-compare-sweep.sh   Nsight-profiled GPU comparison sweep (separate
+                         from run-compare-sweep.sh; GPU configs only)
+  job-nsys-compare-gpu.sh     PBS wrapper for the profiled GPU sweep
+  gen_nsys_compare_report.py  parse the profiled traces -> Fortran do-concurrent
+                         vs C++ AMReX ParallelFor leaf-kernel compute report
   strip_commentary.py    recover the facts-only report from an annotated one
 docs/
   METHODOLOGY.md         scaling methodology (weak/strong, fixed-step trick)
@@ -65,6 +70,21 @@ then, once both jobs finish:
 
 ```bash
 python3 gen_compare_report.py --run-dir <run_dir> --label compare-sweep
+```
+
+For a kernel-level view, the two GPU configs can be re-run under Nsight Systems
+by a **separate** script (`run-nsys-compare-sweep.sh`, which never touches the
+plain sweep's producer) and reported by `gen_nsys_compare_report.py`. It compares
+**only** the continuity PPM *leaf* kernels — `PPM_reconstruction_x/y` and the
+positive-definite / CW84 limiters — the bottom-of-tree compute kernels that appear
+as standalone GPU kernels in *both* builds, pairing Fortran `do concurrent` against
+C++ AMReX `ParallelFor` apples-to-apples. Compute only; reads the per-trace
+`*_cuda_gpu_kern_sum.csv` dumps, so no nsys is needed at report time. GPU-only; see
+the "Nsight-profiled variant" section of `docs/COMPARE_SWEEP.md`.
+
+```bash
+qsub /path/to/turbo-prof/scripts/job-nsys-compare-gpu.sh
+python3 gen_nsys_compare_report.py --run-dir <run_dir> --label nsys-compare
 ```
 
 ## Generating a report

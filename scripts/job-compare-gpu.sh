@@ -2,7 +2,7 @@
 #PBS -A NCGD0067
 #PBS -N mom6_compare_gpu
 #PBS -q main
-#PBS -l walltime=01:00:00
+#PBS -l walltime=06:00:00
 #PBS -l select=1:ncpus=64:mpiprocs=1:ngpus=1
 #PBS -l job_priority=premium
 
@@ -15,11 +15,10 @@ module load ncarenv/25.10 cuda/12.9.0 hdf5/1.14.6 nvhpc/25.9 ncarcompilers/1.1.0
 ### Set temp to scratch
 export TMPDIR=${SCRATCH}/${USER}/temp && mkdir -p $TMPDIR
 
-#CONFIGS=${CONFIGS:-"dev_turbo_GPU iturbo_GPU_amrex"}
-CONFIGS=${CONFIGS:-"iturbo_GPU_amrex"}
+CONFIGS=${CONFIGS:-"dev_turbo_GPU iturbo_GPU_amrex"}
 JOBSIZES=${JOBSIZES:-"1 2 4 8 16 32 64 128 256 512 1024"}
 NRUNS=${NRUNS:-3}
-RUN_DIR=${RUN_DIR:-/glade/derecho/scratch/altuntas/double_gyre_new}
+RUN_DIR=${RUN_DIR:-/glade/derecho/scratch/altuntas/double_gyre.260616}
 
 cd ${RUN_DIR}
 

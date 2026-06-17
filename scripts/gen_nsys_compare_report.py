@@ -161,6 +161,111 @@ def plot_ratio(dc_rows, pf_rows, outpath):
     return outpath
 
 
+# Per-config line styles (color by programming model, not by leaf).
+_CFG_STYLE = {"dc": dict(color="C0", marker="o", label="Fortran do concurrent"),
+              "pf": dict(color="C3", marker="s", label="C++ AMReX ParallelFor")}
+_XLABEL = "Problem size (total gridpoints = NI x NJ x 100)"
+
+
+def _ref_lines(ax, label=False):
+    """Dashed gray verticals at each production operating point (REF_POINTS)."""
+    import matplotlib.transforms as mtransforms
+    for gp, lab in REF_POINTS:
+        ax.axvline(gp, ls="--", alpha=0.6, color="gray")
+        if label:
+            trans = mtransforms.blended_transform_factory(ax.transData, ax.transAxes)
+            ax.text(gp, 0.02, " " + lab, rotation=90, transform=trans,
+                    va="bottom", ha="right", fontsize=8, color="gray")
+
+
+def plot_total(dc_rows, pf_rows, outpath):
+    """Aggregate leaf compute (sum of all leaves) per config vs size, with the
+    do-concurrent / ParallelFor ratio in a lower panel."""
+    import matplotlib.pyplot as plt
+
+    def totals(rows):
+        out = {}
+        for r in rows:
+            s = sum(lv[0] for lv in r["leaves"].values())
+            if s > 0:
+                out[r["i"]] = (r["gridpoints"], s)
+        return out
+
+    dc, pf = totals(dc_rows), totals(pf_rows)
+    if not dc and not pf:
+        return None
+    fig, (ax, axr) = plt.subplots(2, 1, figsize=(8, 7), sharex=True,
+                                  gridspec_kw=dict(height_ratios=[3, 1]))
+    for d, sty in ((dc, _CFG_STYLE["dc"]), (pf, _CFG_STYLE["pf"])):
+        pts = sorted(d.values())
+        if pts:
+            ax.plot([gp for gp, _ in pts], [ns / 1e6 for _, ns in pts], **sty)
+    rpts = [(dc[i][0], dc[i][1] / pf[i][1])
+            for i in sorted(set(dc) & set(pf)) if pf[i][1] > 0]
+    if rpts:
+        rpts.sort()
+        axr.plot([x for x, _ in rpts], [y for _, y in rpts], color="black", marker="d")
+    axr.axhline(1.0, ls="-", color="gray", alpha=0.6, lw=1)
+    _ref_lines(ax, label=True)
+    _ref_lines(axr)
+    ax.set_xscale("log")
+    ax.set_yscale("log")   # compute spans ~3 decades; log-log shows all sizes (the
+                           # ratio panel below carries the do-concurrent/PF gap)
+    ax.set_ylabel("total leaf compute (ms / run)")
+    ax.set_title("Aggregate continuity leaf compute: Fortran do-concurrent vs C++ ParallelFor")
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(fontsize=9)
+    axr.set_ylabel("do-concurrent / ParallelFor")
+    axr.set_xlabel(_XLABEL)
+    axr.grid(True, which="both", alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
+def plot_per_launch(dc_rows, pf_rows, outpath):
+    """Per-launch average GPU time (total time / launches) per leaf, both configs
+    vs problem size -- the per-kernel cost decoupled from launch count."""
+    import matplotlib.pyplot as plt
+    dc = {r["i"]: r for r in dc_rows}
+    pf = {r["i"]: r for r in pf_rows}
+    fig, axes = plt.subplots(2, 2, figsize=(11, 8), sharex=True)
+    drawn = False
+    for ax, (key, _, label) in zip(axes.flat, LEAVES):
+        sub_drawn = False
+        for rows, sty in ((dc, _CFG_STYLE["dc"]), (pf, _CFG_STYLE["pf"])):
+            pts = []
+            for i in sorted(rows):
+                lv = rows[i]["leaves"].get(key)
+                if lv and lv[1] > 0:
+                    pts.append((rows[i]["gridpoints"], lv[0] / lv[1] / 1e3))  # us/launch
+            if pts:
+                pts.sort()
+                ax.plot([x for x, _ in pts], [y for _, y in pts], **sty)
+                drawn = sub_drawn = True
+        ax.set_title(label, fontsize=10)
+        ax.set_xscale("log")
+        ax.grid(True, which="both", alpha=0.3)
+        _ref_lines(ax)
+        if not sub_drawn:
+            ax.text(0.5, 0.5, "no launches in these traces", transform=ax.transAxes,
+                    ha="center", va="center", color="gray", fontsize=9)
+    if not drawn:
+        plt.close(fig)
+        return None
+    axes.flat[0].legend(fontsize=9)
+    for ax in axes[-1]:
+        ax.set_xlabel(_XLABEL)
+    for ax in axes[:, 0]:
+        ax.set_ylabel("us / launch")
+    fig.suptitle("Per-launch kernel time per leaf: Fortran do-concurrent vs C++ ParallelFor")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=120)
+    plt.close(fig)
+    return outpath
+
+
 # --- tables -----------------------------------------------------------------
 
 def grid_label(r):
@@ -190,7 +295,7 @@ def leaf_table(dc_rows, pf_rows, key):
     if not body:
         return None
     head = ("| size | do-concurrent (ms) | launches | ParallelFor (ms) | launches "
-            "| dc / PF |\n|---|--:|--:|--:|--:|--:|\n")
+            "| do-concurrent / ParallelFor |\n|---|--:|--:|--:|--:|--:|\n")
     return head + "\n".join(body)
 
 
@@ -227,13 +332,15 @@ def build_report(dc_rows, pf_rows, plots, stacks, title, prov=None):
 
     L.append("## Intent\n")
     L.append(
-        "Compare the same continuity PPM **leaf** kernels implemented two ways on "
-        "one A100: **Fortran `do concurrent`** (`dev_turbo_GPU`) vs **C++ AMReX "
-        "`ParallelFor`** (`iturbo_GPU_amrex`, AMREX mode). Leaf kernels are the only "
-        "continuity kernels that pair apples-to-apples -- they appear standalone in "
-        "both builds with matching launch counts and do the identical computation. "
-        "This isolates the **programming model's effect on kernel compute**, with "
-        "the AMReX bridge's data-movement cost deliberately excluded.\n")
+        "The same continuity PPM **leaf** kernels, two ways on one A100: Fortran "
+        "`do concurrent` (`dev_turbo_GPU`) vs C++ AMReX `ParallelFor` "
+        "(`iturbo_GPU_amrex`). These are the only continuity kernels that pair "
+        "apples-to-apples -- standalone in both builds, matching launch counts, "
+        "identical computation. Crucially, both sides are timed by the **same** "
+        "profiler (nsys), unlike the compare-sweep which mixes FMS mpp_clock with "
+        "AMReX TinyProfiler -- so this is the single-clock check on the programming "
+        "model's effect on kernel compute. The transitional AMReX bridge is "
+        "excluded.\n")
     L.append(f"| | config | implementation | stack |\n|---|---|---|---|\n"
              f"| do-concurrent | `{DC[0]}` | {DC[2]} | `{stacks.get(DC[1], '?')}` |\n"
              f"| ParallelFor | `{PF[0]}` | {PF[2]} | `{stacks.get(PF[1], '?')}` |\n")
@@ -241,43 +348,44 @@ def build_report(dc_rows, pf_rows, plots, stacks, title, prov=None):
 
     L.append("## Methodology\n")
     L.append(
-        "- **Source:** the per-trace `*_cuda_gpu_kern_sum.csv` files dumped by "
-        "`run-nsys-compare-sweep.sh` (nsys auto-demangled; the `MOM::<routine>` "
-        "reference survives, so a substring match isolates each leaf). No nsys at "
-        "report time.\n"
-        "- **Leaves compared:** `PPM_reconstruction_x/y`, `ppm_limit_pos`, "
-        "`ppm_limit_cw84`. A routine that emits several GPU loops has them summed; "
-        "the launch count is shown for both sides, and a row is flagged if the "
-        "counts differ (then it is not a clean pair).\n"
-        "- **Excluded by design:** the `edge_thickness` wrappers (inlined in "
-        "dev/turbo), the un-ported solver bulk (`mass_flux`, `flux_adjust`, "
-        "`set_*_bt_cont`, `convergence` -- no ParallelFor exists), and the AMReX "
-        "**bridge** (repack kernels + host<->device copies). This is kernel compute "
-        "only; for the bridge/data-movement story see the single-build AMReX report "
-        "(`gen_amrex_report.py`, `docs/AMREX_PROFILING.md`).\n"
-        "- **Build flags (verified, not assumed):** both leaves are built with the "
-        "same nvhpc 25.9 toolchain targeting `sm_80`, with **FMA disabled on both "
-        "sides** (Fortran `-Mnofma -Kieee`; CUDA `--fmad=false`), and the Fortran "
-        "compile flags are identical between the two stacks. So the comparison is "
-        "NOT confounded by compiler version, GPU arch, or FMA/fast-math. The "
-        "residual differences are intrinsic to the two programming models: the "
-        "Fortran path is nvfortran `do concurrent` at `-O2 -stdpar=gpu`, the AMReX "
-        "path is nvcc `ParallelFor` with the **device code pinned to `-Xptxas -O2`** "
-        "(verified by reproducing the kernel TU's compile -- without it nvcc leaves "
-        "ptxas at its default `-O3`), so both leaves are device-optimized at the "
-        "same `-O2`. The MOM6 source commits also differ (dev/turbo `ulm-10623` vs "
-        "iturbo `ulm-10627`), but the leaf compute is a distinct implementation in "
-        "each by construction. Times are traced (Nsight) GPU kernel time.\n")
+        "- **Source:** per-trace `*_cuda_gpu_kern_sum.csv` from "
+        "`run-nsys-compare-sweep.sh`; a substring match on the auto-demangled "
+        "`MOM::<routine>` name isolates each leaf. No nsys at report time.\n"
+        "- **Leaves:** `PPM_reconstruction_x/y`, `ppm_limit_pos`, `ppm_limit_cw84`; "
+        "multiple GPU loops per routine are summed, and a size is flagged if the two "
+        "sides' launch counts differ (not a clean pair).\n"
+        "- **Excluded:** the inlined `edge_thickness` wrappers, the un-ported solver "
+        "bulk, and the transitional AMReX bridge (repack + copies).\n"
+        "- **Fair by construction:** same nvhpc 25.9 / `sm_80`, FMA off on both "
+        "sides (`-Mnofma -Kieee` / `--fmad=false`), device code at `-O2` both ways -- "
+        "so differences are intrinsic to the programming models, not the toolchain. "
+        "Times are traced (Nsight) GPU kernel time.\n")
     L.append("<!-- commentary: methodology -->\n")
 
+    if plots.get("total"):
+        L.append("## Aggregate leaf compute\n")
+        L.append(f"![Total leaf compute]({os.path.basename(plots['total'])})\n")
+        L.append(
+            "Sum of all leaf kernels' GPU time per run vs problem size; lower panel "
+            "is the do-concurrent / ParallelFor ratio (>1 = ParallelFor faster). The "
+            "headline compute number.\n")
+        L.append("<!-- commentary: total-compute -->\n")
+
     if plots.get("ratio"):
-        L.append("## do-concurrent vs ParallelFor (ratio)\n")
+        L.append("## Per-leaf ratio\n")
         L.append(f"![Leaf ratio]({os.path.basename(plots['ratio'])})\n")
         L.append(
-            "Ratio of do-concurrent to ParallelFor GPU kernel time per leaf vs "
-            "problem size. The black line is parity (1.0); above it ParallelFor is "
-            "faster, below it do-concurrent is faster.\n")
+            "Per-leaf do-concurrent / ParallelFor GPU-time ratio vs size "
+            "(black line = parity; above it ParallelFor is faster).\n")
         L.append("<!-- commentary: ratio-trend -->\n")
+
+    if plots.get("per_launch"):
+        L.append("## Per-launch kernel time\n")
+        L.append(f"![Per-launch time]({os.path.basename(plots['per_launch'])})\n")
+        L.append(
+            "GPU time for a single launch of each leaf (total / launches), "
+            "decoupling per-kernel cost from launch count.\n")
+        L.append("<!-- commentary: per-launch -->\n")
 
     L.append("## Per-leaf comparison\n")
     any_leaf = False
@@ -340,7 +448,10 @@ def main():
 
     plots = {}
     if not args.no_plots:
+        plots["total"] = plot_total(dc_rows, pf_rows, os.path.join(outdir, "leaf_total.png"))
         plots["ratio"] = plot_ratio(dc_rows, pf_rows, os.path.join(outdir, "leaf_ratio.png"))
+        plots["per_launch"] = plot_per_launch(
+            dc_rows, pf_rows, os.path.join(outdir, "leaf_per_launch.png"))
 
     report = build_report(dc_rows, pf_rows, plots, stacks, args.title, prov=prov)
     with open(os.path.join(outdir, "report.md"), "w") as fh:

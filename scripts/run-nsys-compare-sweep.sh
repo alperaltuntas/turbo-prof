@@ -30,10 +30,10 @@ NRUNS=${3:-2}
 NSTEPS=${NSTEPS:-40}
 NSYS=${NSYS:-nsys}
 DUMP_CSV=${DUMP_CSV:-1}
-# Per-trace CSV reports to dump (full names; cuda_gpu_kern_sum is auto-demangled).
-# nvtx_gpu_proj_sum projects GPU time onto the NVTX ranges (present on iturbo's
-# AMReX path; empty for dev/turbo).
-CSV_REPORTS="cuda_gpu_kern_sum cuda_gpu_mem_time_sum cuda_gpu_mem_size_sum cuda_api_sum nvtx_gpu_proj_sum"
+# Per-trace CSV report to dump (auto-demangled): only cuda_gpu_kern_sum, the one
+# gen_nsys_compare_report.py consumes (leaf compute totals/ratio/per-launch). The
+# .nsys-rep still captures everything, so other reports can be extracted ad hoc.
+CSV_REPORTS="cuda_gpu_kern_sum"
 
 # Default GPU stack checkouts per build variant (override via env).
 STACK_DEV_TURBO=${STACK_DEV_TURBO:-/glade/work/altuntas/turbo-stack-dev-turbo}

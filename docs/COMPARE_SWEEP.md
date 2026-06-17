@@ -185,7 +185,13 @@ python3 gen_nsys_compare_report.py \
     --label nsys-compare
 ```
 
-The report directory holds `report.md` (anchors below), `leaf_ratio.png`,
+The report directory holds `report.md` (anchors below); the plots `leaf_total.png`
+(aggregate leaf compute on a log-log top panel + a linear do-concurrent/ParallelFor
+ratio panel), `leaf_ratio.png` (per-leaf ratio), and `leaf_per_launch.png`
+(per-launch time per leaf);
 `results.csv` (one row per config/size/leaf with the summed GPU time `gpu_ms` and
-`launches`), and a `provenance.json` covering the two GPU stacks. Commentary
-anchors: `key-finding`, `methodology`, `ratio-trend`, `leaf-comparison`.
+`launches`); and a `provenance.json` covering the two GPU stacks. Commentary
+anchors: `key-finding`, `methodology`, `total-compute`, `ratio-trend`,
+`per-launch`, `leaf-comparison`.
+
+All plots come from `cuda_gpu_kern_sum`, the only report `CSV_REPORTS` dumps.

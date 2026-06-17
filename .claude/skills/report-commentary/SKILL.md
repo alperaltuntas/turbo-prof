@@ -105,8 +105,14 @@ to the compare-sweep `kernels` hypothesis above), the anchors are:
   summed; the launch counts are shown so any non-clean pairing (mismatched
   launches) is visible; and everything is read from the dumped
   `*_cuda_gpu_kern_sum.csv` (no nsys at report time).
+- `total-compute` — the headline aggregate (all leaves summed) and its
+  do-concurrent/ParallelFor ratio: which model's leaf compute is faster overall,
+  and by how much. The top panel is log-log (compute spans decades), so read the
+  *gap* from the linear ratio panel, not the near-overlapping top curves.
 - `ratio-trend` — read the Fortran/AMReX ratio across grid sizes: is one path's
   advantage fixed, or does it grow/shrink as the problem scales?
+- `per-launch` — per-launch time per leaf (total time / launches): whether a
+  model's edge is intrinsic to the kernel or an artifact of how often it launches.
 - `leaf-comparison` — the per-leaf breakdown: which individual leaves drive the
   overall difference, and whether any leaf bucks the aggregate trend (e.g. one
   reconstruction faster under AMReX while a limiter is faster under Fortran).

@@ -116,11 +116,21 @@ get_layout() {
   	fi
 }
 
-# write_mom_override <daymax>: emit MOM_override for the current grid. Reads the
-# globals the caller has already computed (ni nj lx ly dt dt_therm); only DAYMAX
-# differs between runners (150 for the plain sweep, NSTEPS for nsys/ncu).
+# write_mom_override <i> <nranks> <daymax>: emit MOM_override for job-size index
+# <i> on <nranks> MPI ranks. Both layouts come from get_layout: the global grid
+# (NIGLOBAL/NJGLOBAL/DT/DT_THERM) from <i>, and the rank decomposition (LAYOUT)
+# from <nranks> -- GPU runners pass NGPUS (1 -> 1x1), the CPU sweep passes its
+# weak-scaled rank count. DAYMAX is 150 for the plain sweep, NSTEPS for nsys/ncu.
 write_mom_override() {
-    local daymax=$1
+    local i=$1 nranks=$2 daymax=$3
+    # `local m n` so get_layout's writes stay scoped here (bash dynamic scoping)
+    # and don't leak into the caller.
+    local m n
+    get_layout "${nranks}"         # rank decomposition -> LAYOUT
+    local lx=$m ly=$n
+    get_layout "${i}"              # global grid -> NIGLOBAL/NJGLOBAL/DT
+    local ni=$(( 32 * m )) nj=$(( 32 * n ))
+    local dt=$(( 1200 / m )) dt_therm=$(( 2400 / m ))
     cat <<EOF > MOM_override
 #override COORD_CONFIG = "linear"
 DENSITY_RANGE = 2.0

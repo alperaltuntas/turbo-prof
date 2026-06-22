@@ -60,18 +60,8 @@ echo "    steps:  ${NSTEPS}   repeats: ${NRUNS}"
 echo "    nsys:   ${NSYS}"
 
 for i in ${JOBSIZES}; do
-    # GPU: 1 rank on 1 device, 1x1 layout.
-    get_layout "${NGPUS}"
-    lx=${m}
-    ly=${n}
-
-    get_layout "${i}"
-    ni=$(( 32 * ${m} ))
-    nj=$(( 32 * ${n} ))
-    dt=$(( 1200 / ${m} ))
-    dt_therm=$(( 2400 / ${m} ))
-
-    write_mom_override "${NSTEPS}"
+    # GPU: 1 rank on 1 device (NGPUS) -> 1x1 rank layout.
+    write_mom_override "${i}" "${NGPUS}" "${NSTEPS}"
     printf -v i0 "%03d" "$i"
 
     for ((r = 1; r <= NRUNS; r++)); do

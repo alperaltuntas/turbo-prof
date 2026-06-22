@@ -71,18 +71,8 @@ echo "    ncu:    ${NCU} (set=${NCU_SET})"
 [ -n "${NCU_KERNEL_FILTER}" ] && echo "    kernel: -k '${NCU_KERNEL_FILTER}'"
 echo "    launch: skip=${LAUNCH_SKIP} count=${LAUNCH_COUNT:-<all>}"
 
-# GPU: 1 rank on 1 device, 1x1 layout.
-get_layout "${NGPUS}"
-lx=${m}
-ly=${n}
-
-get_layout "${I}"
-ni=$(( 32 * ${m} ))
-nj=$(( 32 * ${n} ))
-dt=$(( 1200 / ${m} ))
-dt_therm=$(( 2400 / ${m} ))
-
-write_mom_override "${NSTEPS}"
+# GPU: 1 rank on 1 device (NGPUS) -> 1x1 rank layout.
+write_mom_override "${I}" "${NGPUS}" "${NSTEPS}"
 printf -v i0 "%03d" "${I}"
 
 TAG=ncu_${CONFIG}_${i0}

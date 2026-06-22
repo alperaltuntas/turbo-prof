@@ -54,24 +54,14 @@ export NGPUS=1  # exported so set_gpu_rank can read it in each rank
 for i in ${JOBSIZES}; do
     nranks=$(( i > CPU_PER_NODE ? CPU_PER_NODE : i ))
 
+    # GPU runs on NGPUS ranks (1 -> 1x1 layout); CPU weak-scales to nranks.
     if [ "$PLATFORM" = "gpu" ]; then
-	   get_layout "${NGPUS}"
+	   rank_count=${NGPUS}
     else
-	   get_layout "${nranks}"
+	   rank_count=${nranks}
     fi
-	lx=${m}
-	ly=${n}
 
-
-	get_layout "${i}"
-
-	ni=$(( 32 * ${m} ))
-	nj=$(( 32 * ${n} ))
-
-    dt=$(( 1200 / ${m} ))
-    dt_therm=$(( 2400 / ${m} ))
-
-    write_mom_override 150
+    write_mom_override "${i}" "${rank_count}" 150
     # File label index
     printf -v i0 "%03d" "$i"
 

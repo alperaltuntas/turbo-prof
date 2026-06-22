@@ -21,7 +21,10 @@
 # the module load puts it on PATH). Env: STACK_DEV_TURBO/STACK_ITURBO, NSTEPS,
 # NSYS, DUMP_CSV.
 
-module load ncarenv/25.10 cuda/12.9.0 hdf5/1.14.6 nvhpc/25.9 ncarcompilers/1.1.0 netcdf/4.9.3
+# Shared helpers (module load, CONFIG->STACK/exec, AMReX env, get_layout,
+# MOM_override) live in lib-compare.sh next to this script.
+. "$(dirname "$0")/lib-compare.sh"
+load_modules
 
 CONFIG=${1:?usage: sh run-nsys-compare-sweep.sh <config> [jobsizes] [nrepeats]}
 JOBSIZES=${2:-"1 2 4 8 16 32 64 128 256 512"}
@@ -35,45 +38,11 @@ DUMP_CSV=${DUMP_CSV:-1}
 # .nsys-rep still captures everything, so other reports can be extracted ad hoc.
 CSV_REPORTS="cuda_gpu_kern_sum"
 
-# Default GPU stack checkouts per build variant (override via env).
-STACK_DEV_TURBO=${STACK_DEV_TURBO:-/glade/work/altuntas/turbo-stack-dev-turbo}
-STACK_ITURBO=${STACK_ITURBO:-/glade/work/altuntas/turbo-stack-iturbo}
-
-case "${CONFIG}" in
-    dev_turbo_GPU)    STACK=${STACK_DEV_TURBO} ;;
-    iturbo_GPU_amrex) STACK=${STACK_ITURBO} ;;
-    dev_turbo_CPU|iturbo_CPU_amrex)
-        echo "run-nsys-compare-sweep.sh: ${CONFIG} is a CPU config; profiling is" >&2
-        echo "  GPU-only (per-kernel device timers come from the GPU trace)." >&2
-        echo "  Use run-compare-sweep.sh for the CPU configs." >&2
-        exit 1 ;;
-    *) echo "run-nsys-compare-sweep.sh: unknown config: ${CONFIG}" >&2; exit 1 ;;
-esac
-
-MOM6_EXEC=${STACK}/bin/nvhpc/MOM6_using_TIM/MOM6/MOM6
-if [ ! -x "${MOM6_EXEC}" ]; then
-    echo "run-nsys-compare-sweep.sh: MOM6 executable not found or not executable: ${MOM6_EXEC}" >&2
-    echo "  check the stack for config ${CONFIG} (got: ${STACK})" >&2
-    exit 1
-fi
-
-# amrex configs route the six ported PPM kernels through AMReX; others unset them
-# (the same executable serves both modes).
-if [ "${CONFIG#*amrex}" != "${CONFIG}" ]; then
-    export ZONAL_EDGE_THICKNESS_MODE=AMREX
-    export MERIDIONAL_EDGE_THICKNESS_MODE=AMREX
-    export PPM_LIMIT_POS_MODE=AMREX
-    export PPM_LIMIT_CW84_MODE=AMREX
-    export PPM_RECONSTRUCTION_X_MODE=AMREX
-    export PPM_RECONSTRUCTION_Y_MODE=AMREX
-else
-    unset ZONAL_EDGE_THICKNESS_MODE
-    unset MERIDIONAL_EDGE_THICKNESS_MODE
-    unset PPM_LIMIT_POS_MODE
-    unset PPM_LIMIT_CW84_MODE
-    unset PPM_RECONSTRUCTION_X_MODE
-    unset PPM_RECONSTRUCTION_Y_MODE
-fi
+# Sets STACK and MOM6_EXEC (stack roots overridable via STACK_*); GPU-only, so
+# reject CPU configs up front.
+resolve_stack "${CONFIG}"
+require_gpu_config "${CONFIG}"
+set_amrex_env "${CONFIG}"
 
 # iturbo args (harmless for dev/turbo): arena_init_size=0 stops AMReX reserving
 # 3/4 of GPU memory (else it OOMs the Fortran stdpar allocs); device_synchronize
@@ -83,32 +52,6 @@ TINY_ARGS="amrex.the_arena_init_size=0 tiny_profiler.device_synchronize_around_r
 export NGPUS=1  # so set_gpu_rank can read it
 
 #---
-
-# Construct a square-like layout m x n for i ranks
-get_layout() {
- 	local i=$1
-  	m=1
-
-	# Find the smallest m such that m**2 > i
-  	while (( (m+1)*(m+1) <= i )); do
-    	((m++))
-  	done
-
-	# Then decrement m until it exactly divides i
-  	while (( i % m != 0 )); do
-  	 ((m--))
-  	done
-
-	# Finally, set n such that m*n == i
-  	n=$(( i / m ))
-
-	# Force m >= n
-  	if (( m < n )); then
-  	 	local t=$m
-  	 	m=$n
-  	 	n=$t
-  	fi
-}
 
 echo "=== nsys-compare sweep: ${CONFIG} @ $(date) ==="
 echo "    stack:  ${STACK}"
@@ -128,22 +71,7 @@ for i in ${JOBSIZES}; do
     dt=$(( 1200 / ${m} ))
     dt_therm=$(( 2400 / ${m} ))
 
-    cat <<EOF > MOM_override
-#override COORD_CONFIG = "linear"
-DENSITY_RANGE = 2.0
-#override NK = 100
-#override NIGLOBAL = ${ni}
-#override NJGLOBAL = ${nj}
-LAYOUT = ${lx},${ly}
-#override DT = ${dt}
-#override DT_THERM = ${dt_therm}
-#override DT_FORCING = ${dt_therm}
-TIMEUNIT = ${dt}
-ENERGYSAVEDAYS = 50
-#override DAYMAX = ${NSTEPS}
-#override READ_DEPTH_LIST = False
-#override RESTART_CONTROL = -1
-EOF
+    write_mom_override "${NSTEPS}"
     printf -v i0 "%03d" "$i"
 
     for ((r = 1; r <= NRUNS; r++)); do

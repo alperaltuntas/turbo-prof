@@ -19,7 +19,7 @@ export TMPDIR=${SCRATCH}/${USER}/temp && mkdir -p $TMPDIR
 CONFIGS=${CONFIGS:-"dev_turbo_GPU iturbo_GPU_amrex"}
 JOBSIZES=${JOBSIZES:-"1 2 4 8 16 32 64 128 256 512"}
 NRUNS=${NRUNS:-2}
-RUN_DIR=${RUN_DIR:-/glade/derecho/scratch/altuntas/double_gyre.260615}
+RUN_DIR=${RUN_DIR:-`pwd`}
 
 # Pass through to run-nsys-compare-sweep.sh.
 [ -n "${NSTEPS}" ] && export NSTEPS

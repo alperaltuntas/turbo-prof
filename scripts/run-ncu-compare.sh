@@ -16,16 +16,15 @@
 # GPU only (CPU configs error). `ncu_` prefix avoids colliding with the plain
 # and nsys sweeps' logs in the same dir.
 #
-# ncu profiles EVERY kernel launch in the run by default; with --set full and
-# MOM6's many kernels even two steps takes a long time. Scope it down with a
-# small i, a kernel-name filter (NCU_KERNEL_FILTER, ncu -k regex), or by
-# skipping warmup / capping launches (LAUNCH_SKIP / LAUNCH_COUNT). NSTEPS
-# defaults to 2 so the run reaches steady state without flooding the report.
+# ncu REPLAYS each launch many times for --set full, so scope the run: set
+# NCU_KERNEL_FILTER (ncu -k regex; the job wrapper defaults it to the leaf
+# kernels), and/or narrow via i / LAUNCH_SKIP / LAUNCH_COUNT. NSTEPS defaults to 2
+# so the run reaches steady state.
 #
 # Run from a double_gyre run dir (input.nml with clock_grain='ROUTINE') on a GPU
 # node. The recorder's ncu comes from nvhpc/25.9 (the module load puts it on
 # PATH). Env: STACK_DEV_TURBO/STACK_ITURBO, NSTEPS, NCU, NCU_SET,
-# NCU_KERNEL_FILTER, LAUNCH_SKIP, LAUNCH_COUNT, DUMP_CSV.
+# NCU_KERNEL_FILTER (empty = all kernels), LAUNCH_SKIP, LAUNCH_COUNT, DUMP_CSV.
 
 # Shared helpers (module load, CONFIG->STACK/exec, AMReX env, get_layout,
 # MOM_override) live in lib-compare.sh next to this script.
@@ -40,7 +39,8 @@ NCU=${NCU:-ncu}
 # Metric set to collect. `full` is every section (the "full ncu report"); narrow
 # to e.g. `basic` or a specific section for faster, smaller captures.
 NCU_SET=${NCU_SET:-full}
-# Optional ncu -k kernel-name regex (empty = profile all kernels).
+# ncu -k kernel-name regex; empty (default) profiles all kernels. The job wrapper
+# job-ncu-compare-gpu.sh supplies the default leaf-kernel filter.
 NCU_KERNEL_FILTER=${NCU_KERNEL_FILTER:-}
 # Launch window: skip the first LAUNCH_SKIP kernel launches (warmup), then
 # profile LAUNCH_COUNT of them (empty = no cap, profile to end of the run).
@@ -81,7 +81,10 @@ TAG=ncu_${CONFIG}_${i0}
 NCU_OPTS=""
 [ "${LAUNCH_SKIP}" != "0" ] && NCU_OPTS="${NCU_OPTS} --launch-skip ${LAUNCH_SKIP}"
 [ -n "${LAUNCH_COUNT}" ]    && NCU_OPTS="${NCU_OPTS} --launch-count ${LAUNCH_COUNT}"
-[ -n "${NCU_KERNEL_FILTER}" ] && NCU_OPTS="${NCU_OPTS} -k ${NCU_KERNEL_FILTER}"
+# `-k regex:` (not a bare name, which ncu treats as an EXACT match) so the filter
+# is a substring search. --kernel-name-base demangled: the AMReX leaf is nested in
+# amrex::launch_global<...> and only shows in the demangled name.
+[ -n "${NCU_KERNEL_FILTER}" ] && NCU_OPTS="${NCU_OPTS} --kernel-name-base demangled -k regex:${NCU_KERNEL_FILTER}"
 
 echo " "
 echo "=== ${CONFIG} [ncu]: size i=${I} @ $(date) ==="
